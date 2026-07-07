@@ -106,9 +106,9 @@ jobs:
         shell: bash
     env:
       BUILD_SOURCEVERSION: ${{ needs.compile.outputs.BUILD_SOURCEVERSION }}
-      MS_COMMIT: ${{ needs.check.outputs.MS_COMMIT }}
-      MS_TAG: ${{ needs.check.outputs.MS_TAG }}
-      RELEASE_VERSION: ${{ needs.check.outputs.RELEASE_VERSION }}
+      MS_COMMIT: ${{ needs.compile.outputs.MS_COMMIT }}
+      MS_TAG: ${{ needs.compile.outputs.MS_TAG }}
+      RELEASE_VERSION: ${{ needs.compile.outputs.RELEASE_VERSION }}
       SHOULD_BUILD_REH: no
       SHOULD_BUILD_REH_WEB: no
       VSCODE_ARCH: ${{ matrix.vscode_arch }}
@@ -150,6 +150,11 @@ jobs:
         run: ./build/windows/package.sh
 
       - name: Prepare assets
+        env:
+          # MSI-Pakete brauchen WiX + Windows-SDK 10.0.17763, die auf den
+          # GitHub-Runnern fehlen. EXE-Installer und ZIP reichen.
+          SHOULD_BUILD_MSI: no
+          SHOULD_BUILD_MSI_NOUP: no
         run: ./prepare_assets.sh
         if: github.event.inputs.generate_assets == 'true'
 
@@ -158,9 +163,4 @@ jobs:
         if: github.event.inputs.generate_assets == 'true'
 
       - name: Upload assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: bin-${{ matrix.vscode_arch }}
-          path: assets/
-          retention-days: 3
-        if: github.event.inputs.generate_assets == 'true'
+        uses: actions/upload-arti
