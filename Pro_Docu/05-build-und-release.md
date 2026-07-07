@@ -40,7 +40,9 @@ cd src/stable/extensions/vscodium-agent
 npx @vscode/vsce package --allow-missing-repository
 ```
 
-Ergebnis `vscodium-agent-<version>.vsix` → in VS Code/VSCodium über Extensions-Ansicht → „···" → „Aus VSIX installieren…". Nützlich, um Agent-Änderungen zu testen, ohne die ganze IDE neu zu bauen.
+Ergebnis `vscodium-agent-<version>.vsix` → in VS Code/VSCodium über Extensions-Ansicht → „···" → „Aus VSIX installieren…".
+
+**Wichtige Einschränkung:** In der eigenen IDE (Stable-Qualität) lässt sich die **eingebaute** Agent-Extension nicht per VSIX überschreiben — VS Code blockt Updates von Built-ins in Stable-Produkten („not allowed to be updated in the current product quality 'stable'"). Das VSIX eignet sich daher für fremde Installationen (Stock-VS-Code/VSCodium ohne eingebauten Agenten). Für die eigene IDE gilt: dauerhafte Updates über den CI-Build (Weg 1), schnelles Ausprobieren über den Entwicklungsmodus (Weg 3) — dort ersetzt die Dev-Version die Built-in im Testfenster.
 
 ## Weg 3: Extension-Entwicklungsmodus
 
