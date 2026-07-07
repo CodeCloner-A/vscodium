@@ -36,6 +36,10 @@ class WorkspaceHost {
 		/** @type {Map<string, {kind:string, path:string, oldContent:string, newContent:string, summary:string}>} */
 		this.changes = new Map();
 		this._changeCounter = 0;
+		/** Optional: Callback nach angewendetem Agent-Write (Pfad). */
+		this.onAgentWrite = null;
+		/** Optional: liefert Aktivitäts-Zusammenfassung (vom Provider gesetzt). */
+		this.activityCallback = null;
 	}
 
 	get rootUri() {
@@ -188,6 +192,8 @@ class WorkspaceHost {
 			return { status: 'rejected', message: 'Vom Benutzer abgelehnt. Nicht identisch erneut versuchen.', changeId: id };
 		}
 
+		if (this.onAgentWrite) { this.onAgentWrite(record.path); }
+
 		if (record.kind === 'delete') {
 			await vscode.workspace.fs.delete(uri, { useTrash: true });
 			return { status: 'applied', changeId: id };
@@ -286,6 +292,16 @@ class WorkspaceHost {
 			});
 			child.on('close', done);
 		});
+	}
+
+	// ── Aktivitäts-Index ──────────────────────────────────────────────────────
+
+	/** Vom Provider gesetzter Callback; liefert die aktuelle Aktivitäts-Zusammenfassung. */
+	async getRecentActivity() {
+		if (this.activityCallback) {
+			return this.activityCallback();
+		}
+		return '(activity tracking unavailable)';
 	}
 
 	// ── Diagnostics ───────────────────────────────────────────────────────────
@@ -393,4 +409,4 @@ function killTree(pid) {
 	}
 }
 
-module.exports = { WorkspaceHost, DIFF_SCHEME, globToRegExp, renderTree };
+module.exports = { WorkspaceHost, DIFF_SCHEME, EXCLUDED_DIRS, globToRegExp, renderTree };

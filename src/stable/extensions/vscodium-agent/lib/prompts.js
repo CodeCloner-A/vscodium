@@ -10,7 +10,8 @@
  *   platform: string,
  *   fileTree: string,
  *   approvalMode: 'review'|'auto',
- *   shell?: string
+ *   shell?: string,
+ *   activity?: string
  * }} ctx
  */
 function buildSystemPrompt(ctx) {
@@ -35,8 +36,12 @@ function buildSystemPrompt(ctx) {
 		'8. All paths are relative to the workspace root. Never touch files outside the workspace.',
 		'9. Commands run in a non-interactive shell. Use non-interactive flags (e.g. --yes, CI=1). Never start watchers or dev servers that do not terminate.',
 		'10. When you are done, call task_complete with a concise German summary of what changed, which files were touched, and test results.',
+		'11. "Recent user activity" below shows where the user is currently working. When the task does not name a file, prefer these files as the starting point. Call get_recent_activity to refresh this during long tasks.',
 		'',
 		`== Approval ==\n${approvalNote}`,
+		'',
+		'== Recent user activity ==',
+		ctx.activity || '(no recorded user activity yet)',
 		'',
 		'== Project tree (truncated) ==',
 		ctx.fileTree || '(empty workspace)',

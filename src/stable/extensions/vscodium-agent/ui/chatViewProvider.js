@@ -14,13 +14,18 @@ const { buildSystemPrompt } = require('../lib/prompts');
 
 const SECRET_KEY = 'vscodiumAgent.firebaseApiKey';
 const STATE_KEY = 'vscodiumAgent.sessions.v1';
+const CAPTURE_KEY = 'vscodiumAgent.lastCaptureAt';
 
 class ChatViewProvider {
 	static viewType = 'vscodiumAgent.chatView';
 
-	/** @param {vscode.ExtensionContext} context */
-	constructor(context) {
+	/**
+	 * @param {vscode.ExtensionContext} context
+	 * @param {import('../lib/activityIndex').ActivityIndex} [activity]
+	 */
+	constructor(context, activity) {
 		this.context = context;
+		this.activity = activity || null;
 		/** @type {vscode.WebviewView|undefined} */
 		this.view = undefined;
 		this.running = false;
@@ -188,6 +193,13 @@ class ChatViewProvider {
 		} else {
 			this.host.options = options;
 		}
+		if (this.activity) {
+			this.host.onAgentWrite = (p) => this.activity.noteAgentWrite(p);
+			this.host.activityCallback = () => {
+				const since = this.context.workspaceState.get(CAPTURE_KEY, 0);
+				return this.activity.summary(8, since);
+			};
+		}
 		return this.host;
 	}
 
@@ -302,13 +314,18 @@ class ChatViewProvider {
 			const host = this.getHost();
 
 			const fileTree = await host.listProjectFiles(cfg.maxTreeEntries);
+			const lastCaptureAt = this.context.workspaceState.get(CAPTURE_KEY, 0);
+			const activityText = this.activity ? this.activity.summary(8, lastCaptureAt) : undefined;
 			const systemPrompt = buildSystemPrompt({
 				rootName: host.rootName,
 				platform: `${process.platform} (${process.arch})`,
 				fileTree,
 				approvalMode: cfg.approvalMode,
-				shell: process.platform === 'win32' ? 'cmd/PowerShell' : 'sh'
+				shell: process.platform === 'win32' ? 'cmd/PowerShell' : 'sh',
+				activity: activityText
 			});
+			// Erfassungszeitpunkt merken: Deltas beziehen sich künftig hierauf.
+			void this.context.workspaceState.update(CAPTURE_KEY, Date.now());
 
 			const self = this;
 			const run = new AgentRun({
@@ -486,6 +503,7 @@ function describeToolCall(name, args) {
 		case 'replace_in_file': return `Ändere ${args.path}`;
 		case 'delete_file': return `Lösche ${args.path}`;
 		case 'run_command': return `$ ${truncate(args.command, 80)}`;
+		case 'get_recent_activity': return 'Nutzeraktivität abrufen';
 		case 'get_diagnostics': return `Diagnostics${args.path ? ` für ${args.path}` : ' (gesamter Workspace)'}`;
 		case 'task_complete': return 'Abschluss';
 		default: return name;

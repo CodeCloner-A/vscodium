@@ -10,6 +10,7 @@
  *     applyChange({kind:'write'|'delete', path, newContent, summary}) -> Promise<{status:'applied'|'rejected', message?}>
  *     runCommand(command, {cwd, timeoutSec, purpose}) -> Promise<{status:'ran'|'skipped', exitCode?, stdout?, stderr?, durationMs?, message?}>
  *     getDiagnostics(relPath?) -> Promise<Array<{path,line,severity,message,source?}>>
+ *     getRecentActivity() -> Promise<string>
  *   }
  *--------------------------------------------------------------------------------------------*/
 
@@ -108,6 +109,14 @@ const TOOL_DECLARATIONS = [
 				purpose: { type: 'STRING', description: 'One short German sentence: why this command (shown to the user).' }
 			},
 			required: ['command', 'purpose']
+		}
+	},
+	{
+		name: 'get_recent_activity',
+		description: 'Returns which files the user recently worked on in the IDE (active file, recently edited/saved files) and what was touched since your last context capture. Use it when the task is ambiguous about where to work, or during long tasks to stay up to date.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {}
 		}
 	},
 	{
@@ -220,6 +229,10 @@ async function executeTool(host, name, args) {
 					};
 				}
 				return { skipped: true, message: result.message || 'Vom Benutzer abgelehnt.' };
+			}
+			case 'get_recent_activity': {
+				const activity = await host.getRecentActivity();
+				return { activity };
 			}
 			case 'get_diagnostics': {
 				const diags = await host.getDiagnostics(args.path || undefined);
