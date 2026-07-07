@@ -1,0 +1,4 @@
+test/**
+.vscodeignore
+**/*.map
+*.vsix

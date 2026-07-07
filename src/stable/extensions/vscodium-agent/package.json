@@ -1,0 +1,169 @@
+{
+  "name": "vscodium-agent",
+  "displayName": "VSCodium Agent",
+  "description": "Integrierter KI-Agent (Firebase AI Logic / Gemini): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
+  "version": "0.1.0",
+  "publisher": "vscodium",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Der Agent kann Dateien ändern und Kommandos ausführen und ist daher nur in vertrauenswürdigen Workspaces verfügbar."
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "activationEvents": [
+    "onView:vscodiumAgent.chatView"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vscodium-agent",
+          "title": "Agent",
+          "icon": "media/agent.svg"
+        }
+      ]
+    },
+    "views": {
+      "vscodium-agent": [
+        {
+          "type": "webview",
+          "id": "vscodiumAgent.chatView",
+          "name": "Agent",
+          "icon": "media/agent.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vscodiumAgent.setApiKey",
+        "title": "Firebase API-Key setzen",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.clearApiKey",
+        "title": "Firebase API-Key löschen",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.testConnection",
+        "title": "Verbindung zu Firebase AI Logic testen",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.newSession",
+        "title": "Neue Sitzung",
+        "category": "Agent",
+        "icon": "$(add)"
+      },
+      {
+        "command": "vscodiumAgent.openSettings",
+        "title": "Agent-Einstellungen öffnen",
+        "category": "Agent",
+        "icon": "$(gear)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "vscodiumAgent.newSession",
+          "when": "view == vscodiumAgent.chatView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vscodiumAgent.openSettings",
+          "when": "view == vscodiumAgent.chatView",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "VSCodium Agent",
+      "properties": {
+        "vscodiumAgent.firebase.projectId": {
+          "type": "string",
+          "default": "controlling-man",
+          "markdownDescription": "Firebase-Projekt-ID für AI Logic (Standard: `controlling-man`)."
+        },
+        "vscodiumAgent.firebase.appId": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional: Firebase App-ID (`1:…:web:…`) aus der Firebase Console. Wird als `X-Firebase-Appid`-Header mitgesendet."
+        },
+        "vscodiumAgent.firebase.backend": {
+          "type": "string",
+          "enum": [
+            "googleAI",
+            "vertexAI"
+          ],
+          "default": "googleAI",
+          "enumDescriptions": [
+            "Gemini Developer API über Firebase AI Logic (Standard, keine Location nötig)",
+            "Vertex AI Gemini API über Firebase AI Logic (Location erforderlich)"
+          ],
+          "description": "Welches AI-Logic-Backend verwendet wird."
+        },
+        "vscodiumAgent.firebase.location": {
+          "type": "string",
+          "default": "us-central1",
+          "description": "Vertex-AI-Region (nur bei Backend \"vertexAI\")."
+        },
+        "vscodiumAgent.model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "markdownDescription": "Gemini-Modellname, z. B. `gemini-2.5-flash` oder `gemini-2.5-pro`."
+        },
+        "vscodiumAgent.approvalMode": {
+          "type": "string",
+          "enum": [
+            "review",
+            "auto"
+          ],
+          "default": "review",
+          "enumDescriptions": [
+            "Review-Modus: Dateiänderungen und Kommandos erfordern Deine Bestätigung (Diff-Vorschau).",
+            "Auto-Modus: Der Agent wendet Änderungen direkt an und führt Kommandos ohne Rückfrage aus."
+          ],
+          "description": "Wie viel Kontrolle Du über Aktionen des Agenten behältst."
+        },
+        "vscodiumAgent.maxIterations": {
+          "type": "number",
+          "default": 24,
+          "minimum": 2,
+          "maximum": 100,
+          "description": "Maximale Anzahl Modell-Schritte pro Aufgabe (Schutz gegen Endlosschleifen/Agent-Drift)."
+        },
+        "vscodiumAgent.commandTimeoutSec": {
+          "type": "number",
+          "default": 180,
+          "minimum": 5,
+          "maximum": 1800,
+          "description": "Timeout in Sekunden für vom Agenten ausgeführte Kommandos (z. B. Testläufe)."
+        },
+        "vscodiumAgent.context.maxTreeEntries": {
+          "type": "number",
+          "default": 250,
+          "description": "Maximale Anzahl Dateien/Ordner, die dem Modell als Projektbaum gezeigt werden."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test/run.js"
+  }
+}
