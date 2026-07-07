@@ -11,8 +11,35 @@
 	const elSetup = document.getElementById('setup');
 	const elStatusModel = document.getElementById('status-model');
 	const elStatusMode = document.getElementById('status-mode');
+	const elSessionSelect = document.getElementById('session-select');
+	const elNewSession = document.getElementById('btn-new-session');
+	const elDelSession = document.getElementById('btn-del-session');
 
 	let running = false;
+
+	// ── Sitzungen ─────────────────────────────────────────────────────────────
+
+	function renderSessions(sessions, activeId) {
+		elSessionSelect.innerHTML = '';
+		for (const s of sessions) {
+			const opt = document.createElement('option');
+			opt.value = s.id;
+			const when = new Date(s.updatedAt).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+			opt.textContent = `${when} · ${s.title}`;
+			if (s.id === activeId) { opt.selected = true; }
+			elSessionSelect.appendChild(opt);
+		}
+	}
+
+	elSessionSelect.addEventListener('change', () => {
+		vscode.postMessage({ type: 'switchSession', id: elSessionSelect.value });
+	});
+	elNewSession.addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
+	elDelSession.addEventListener('click', () => {
+		if (elSessionSelect.value) {
+			vscode.postMessage({ type: 'deleteSession', id: elSessionSelect.value });
+		}
+	});
 
 	// ── Senden / Stoppen ──────────────────────────────────────────────────────
 
@@ -161,6 +188,9 @@
 		elSend.classList.toggle('hidden', value);
 		elStop.classList.toggle('hidden', !value);
 		elInput.disabled = false;
+		elSessionSelect.disabled = value;
+		elNewSession.disabled = value;
+		elDelSession.disabled = value;
 		document.body.classList.toggle('running', value);
 	}
 
@@ -174,10 +204,14 @@
 				elSetup.classList.toggle('hidden', msg.state.configured);
 				elStatusModel.textContent = `${msg.state.projectId} · ${msg.state.model}`;
 				elStatusMode.textContent = msg.state.approvalMode === 'review' ? 'Review-Modus' : 'Auto-Modus';
+				renderSessions(msg.state.sessions || [], msg.state.activeSessionId);
 				for (const item of msg.state.items) { render(item); }
 				setRunning(msg.state.running);
 				break;
 			}
+			case 'sessions':
+				renderSessions(msg.sessions || [], msg.activeSessionId);
+				break;
 			case 'append':
 				render(msg.item);
 				break;

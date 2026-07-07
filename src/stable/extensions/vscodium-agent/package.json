@@ -2,7 +2,7 @@
   "name": "vscodium-agent",
   "displayName": "VSCodium Agent",
   "description": "Integrierter KI-Agent (Firebase AI Logic / Gemini): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
@@ -26,6 +26,7 @@
     }
   },
   "activationEvents": [
+    "onStartupFinished",
     "onView:vscodiumAgent.chatView"
   ],
   "main": "./extension.js",
@@ -127,6 +128,18 @@
           "type": "string",
           "default": "gemini-2.5-flash",
           "markdownDescription": "Gemini-Modellname, z. B. `gemini-2.5-flash` oder `gemini-2.5-pro`."
+        },
+        "vscodiumAgent.openOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Agent-Chat beim Start der IDE automatisch öffnen."
+        },
+        "vscodiumAgent.sessions.max": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Maximal gespeicherte Sitzungen pro Projekt (älteste werden entfernt)."
         },
         "vscodiumAgent.approvalMode": {
           "type": "string",

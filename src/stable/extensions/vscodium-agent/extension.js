@@ -73,6 +73,14 @@ function activate(context) {
 			void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:vscodium.vscodium-agent');
 		})
 	);
+
+	// Agent-Chat beim IDE-Start automatisch öffnen (wie in agentischen IDEs üblich).
+	const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
+	if (cfg.get('openOnStartup', true) && (vscode.workspace.workspaceFolders || []).length > 0) {
+		setTimeout(() => {
+			vscode.commands.executeCommand('vscodiumAgent.chatView.focus').then(undefined, () => { /* View noch nicht bereit – unkritisch */ });
+		}, 600);
+	}
 }
 
 function deactivate() { /* nichts zu tun */ }

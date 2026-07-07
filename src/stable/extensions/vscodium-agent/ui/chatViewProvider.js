@@ -1,5 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- * VSCodium Agent – Chat-Sidebar (WebviewViewProvider) inkl. Review-Karten und Orchestrierung.
+ * VSCodium Agent – Chat-Sidebar (WebviewViewProvider) inkl. Review-Karten, Orchestrierung
+ * und persistenten Sitzungen (workspaceState, pro Projekt).
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
@@ -12,6 +13,7 @@ const { WorkspaceHost } = require('../lib/workspaceHost');
 const { buildSystemPrompt } = require('../lib/prompts');
 
 const SECRET_KEY = 'vscodiumAgent.firebaseApiKey';
+const STATE_KEY = 'vscodiumAgent.sessions.v1';
 
 class ChatViewProvider {
 	static viewType = 'vscodiumAgent.chatView';
@@ -21,10 +23,6 @@ class ChatViewProvider {
 		this.context = context;
 		/** @type {vscode.WebviewView|undefined} */
 		this.view = undefined;
-		/** @type {Array<object>} Transkript-Items für Re-Render. */
-		this.items = [];
-		/** @type {Array<object>} Gemini-contents-Historie der Sitzung. */
-		this.history = [];
 		this.running = false;
 		/** @type {AbortController|null} */
 		this.abort = null;
@@ -32,6 +30,116 @@ class ChatViewProvider {
 		this.pendingDecisions = new Map();
 		/** @type {WorkspaceHost|null} */
 		this.host = null;
+		this._saveTimer = null;
+
+		this._loadSessions();
+	}
+
+	// ── Sitzungen (Persistenz: workspaceState, pro Projekt) ──────────────────
+
+	_loadSessions() {
+		const stored = this.context.workspaceState.get(STATE_KEY);
+		if (stored && Array.isArray(stored.sessions) && stored.sessions.length > 0) {
+			this.sessions = stored.sessions;
+			this.activeSessionId = stored.activeId && this.sessions.some(s => s.id === stored.activeId)
+				? stored.activeId
+				: this.sessions[0].id;
+		} else {
+			this.sessions = [];
+			this.activeSessionId = null;
+			this._createSession();
+		}
+	}
+
+	_createSession() {
+		const session = {
+			id: crypto.randomUUID(),
+			title: 'Neue Sitzung',
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+			items: [],
+			history: []
+		};
+		this.sessions.unshift(session);
+		const max = vscode.workspace.getConfiguration('vscodiumAgent').get('sessions.max', 20);
+		if (this.sessions.length > max) {
+			this.sessions = this.sessions
+				.slice()
+				.sort((a, b) => b.updatedAt - a.updatedAt)
+				.slice(0, max);
+		}
+		this.activeSessionId = session.id;
+		this._scheduleSave();
+		return session;
+	}
+
+	get session() {
+		let s = this.sessions.find(x => x.id === this.activeSessionId);
+		if (!s) { s = this._createSession(); }
+		return s;
+	}
+
+	get items() { return this.session.items; }
+	get history() { return this.session.history; }
+	set history(value) { this.session.history = value; }
+
+	_scheduleSave() {
+		if (this._saveTimer) { clearTimeout(this._saveTimer); }
+		this._saveTimer = setTimeout(() => {
+			this._saveTimer = null;
+			void this.context.workspaceState.update(STATE_KEY, {
+				sessions: this.sessions,
+				activeId: this.activeSessionId
+			});
+		}, 400);
+	}
+
+	sessionSummaries() {
+		return this.sessions
+			.slice()
+			.sort((a, b) => b.updatedAt - a.updatedAt)
+			.map(s => ({ id: s.id, title: s.title, updatedAt: s.updatedAt }));
+	}
+
+	newSession() {
+		if (this.running) {
+			void vscode.window.showWarningMessage('Bitte zuerst den laufenden Agenten stoppen.');
+			return;
+		}
+		this._rejectAllPending();
+		// Leere aktive Sitzung wiederverwenden statt Duplikate anzulegen.
+		if (this.session.items.length > 0) {
+			this._createSession();
+		}
+		void this._sendInit();
+	}
+
+	switchSession(id) {
+		if (this.running) {
+			void vscode.window.showWarningMessage('Sitzungswechsel erst nach Stopp des laufenden Agenten.');
+			void this._sendInit();
+			return;
+		}
+		if (this.sessions.some(s => s.id === id)) {
+			this._rejectAllPending();
+			this.activeSessionId = id;
+			this._scheduleSave();
+		}
+		void this._sendInit();
+	}
+
+	deleteSession(id) {
+		if (this.running && id === this.activeSessionId) {
+			void vscode.window.showWarningMessage('Aktive Sitzung erst nach Stopp löschbar.');
+			return;
+		}
+		this.sessions = this.sessions.filter(s => s.id !== id);
+		if (this.activeSessionId === id) {
+			this.activeSessionId = this.sessions.length > 0 ? this.sessions[0].id : null;
+			if (!this.activeSessionId) { this._createSession(); }
+		}
+		this._scheduleSave();
+		void this._sendInit();
 	}
 
 	// ── Konfiguration ─────────────────────────────────────────────────────────
@@ -70,18 +178,15 @@ class ChatViewProvider {
 
 	getHost() {
 		const cfg = this.config();
+		const options = {
+			approvalMode: cfg.approvalMode,
+			commandTimeoutSec: cfg.commandTimeoutSec,
+			maxTreeEntries: cfg.maxTreeEntries
+		};
 		if (!this.host) {
-			this.host = new WorkspaceHost(this._approvals(), {
-				approvalMode: cfg.approvalMode,
-				commandTimeoutSec: cfg.commandTimeoutSec,
-				maxTreeEntries: cfg.maxTreeEntries
-			});
+			this.host = new WorkspaceHost(this._approvals(), options);
 		} else {
-			this.host.options = {
-				approvalMode: cfg.approvalMode,
-				commandTimeoutSec: cfg.commandTimeoutSec,
-				maxTreeEntries: cfg.maxTreeEntries
-			};
+			this.host.options = options;
 		}
 		return this.host;
 	}
@@ -133,6 +238,12 @@ class ChatViewProvider {
 			case 'newSession':
 				this.newSession();
 				break;
+			case 'switchSession':
+				this.switchSession(String(msg.id || ''));
+				break;
+			case 'deleteSession':
+				this.deleteSession(String(msg.id || ''));
+				break;
 			case 'openSettings':
 				void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:vscodium.vscodium-agent');
 				break;
@@ -153,22 +264,14 @@ class ChatViewProvider {
 				model: cfg.model,
 				approvalMode: cfg.approvalMode,
 				running: this.running,
-				items: this.items
+				items: this.items,
+				sessions: this.sessionSummaries(),
+				activeSessionId: this.activeSessionId
 			}
 		});
 	}
 
-	// ── Sitzungs-Steuerung ────────────────────────────────────────────────────
-
-	newSession() {
-		if (this.abort) { this.abort.abort(); }
-		this._rejectAllPending();
-		this.items = [];
-		this.history = [];
-		this.running = false;
-		if (this.host) { this.host.changes.clear(); }
-		void this._sendInit();
-	}
+	// ── Aufgaben-Ausführung ───────────────────────────────────────────────────
 
 	async runTask(text) {
 		if (!text) { return; }
@@ -180,6 +283,12 @@ class ChatViewProvider {
 		if (!apiKey) {
 			this._post({ type: 'append', item: this._pushItem({ kind: 'error', text: 'Kein Firebase API-Key gesetzt. Über „API-Key setzen" den Web-API-Key des Projekts eintragen.' }) });
 			return;
+		}
+
+		const session = this.session;
+		if (session.title === 'Neue Sitzung') {
+			session.title = text.length > 48 ? text.slice(0, 48) + '…' : text;
+			this._post({ type: 'sessions', sessions: this.sessionSummaries(), activeSessionId: this.activeSessionId });
 		}
 
 		this._pushAndSend({ kind: 'user', text });
@@ -216,6 +325,7 @@ class ChatViewProvider {
 						const item = self.items.find(i => i.kind === 'tool' && i.id === id);
 						if (item) { item.status = ok ? 'ok' : 'warn'; item.result = summary; }
 						self._post({ type: 'toolUpdate', id, status: ok ? 'ok' : 'warn', result: summary });
+						self._scheduleSave();
 					},
 					info: (t) => self._pushAndSend({ kind: 'info', text: t }),
 					error: (t) => self._pushAndSend({ kind: 'error', text: t })
@@ -241,6 +351,7 @@ class ChatViewProvider {
 			this.abort = null;
 			this._rejectAllPending();
 			this._post({ type: 'running', value: false });
+			this._scheduleSave();
 		}
 	}
 
@@ -265,6 +376,7 @@ class ChatViewProvider {
 				const accepted = await self._awaitDecision(info.id);
 				item.status = accepted ? 'accepted' : 'rejected';
 				self._post({ type: 'decision', id: info.id, status: item.status });
+				self._scheduleSave();
 				return accepted;
 			},
 			async requestCommandApproval(info) {
@@ -282,6 +394,7 @@ class ChatViewProvider {
 				const accepted = await self._awaitDecision(id);
 				item.status = accepted ? 'accepted' : 'rejected';
 				self._post({ type: 'decision', id, status: item.status });
+				self._scheduleSave();
 				return accepted;
 			}
 		};
@@ -307,6 +420,8 @@ class ChatViewProvider {
 
 	_pushItem(item) {
 		this.items.push(item);
+		this.session.updatedAt = Date.now();
+		this._scheduleSave();
 		return item;
 	}
 
@@ -336,9 +451,14 @@ class ChatViewProvider {
 <title>Agent</title>
 </head>
 <body>
+	<div id="sessionbar">
+		<select id="session-select" title="Sitzung wählen"></select>
+		<button id="btn-new-session" class="secondary" title="Neue Sitzung">＋</button>
+		<button id="btn-del-session" class="secondary" title="Sitzung löschen">🗑</button>
+	</div>
 	<div id="setup" class="hidden">
 		<p><strong>Firebase AI Logic ist noch nicht verbunden.</strong></p>
-		<p>Web-API-Key des Firebase-Projekts hinterlegen (Console → Projekteinstellungen → Allgemein → Web-App).</p>
+		<p>Web-API-Key des Firebase-Projekts hinterlegen (Console → Projekteinstellungen → Allgemein).</p>
 		<button id="btn-setkey">API-Key setzen</button>
 		<button id="btn-settings" class="secondary">Einstellungen</button>
 	</div>
