@@ -68,7 +68,7 @@ Da der Agent ausschließlich in **neuen** Dateien lebt (`src/stable/extensions/v
 ## Release-Checkliste
 
 1. Headless-Tests grün: `node src/stable/extensions/vscodium-agent/test/run.js`
-2. Version in `src/stable/extensions/vscodium-agent/package.json` erhöhen (SemVer: Fixes = Patch, Features = Minor).
+2. Version in `src/stable/extensions/vscodium-agent/package.json` erhöhen (SemVer: Fixes = Patch, Features = Minor) und `CHANGELOG.md` der Extension pflegen (Keep-a-Changelog-Format; Einträge aus „Unreleased" unter die neue Version ziehen).
 3. Commit + Push, Actions-Lauf mit „Generate assets".
 4. `bin-x64` laden, Installer auf einem sauberen System testen (Installation, Key setzen, Verbindungstest, eine kleine Aufgabe).
 5. Installer + Prüfsummen archivieren; optional als GitHub-Release veröffentlichen.
