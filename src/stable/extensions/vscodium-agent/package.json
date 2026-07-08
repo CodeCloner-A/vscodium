@@ -2,7 +2,7 @@
   "name": "vscodium-agent",
   "displayName": "VSCodium Agent",
   "description": "Integrierter KI-Agent (Firebase AI Logic / Gemini): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
