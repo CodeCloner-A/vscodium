@@ -72,6 +72,7 @@ jobs:
 
       - name: Build
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHOULD_BUILD: yes
           SHOULD_BUILD_REH: no
           SHOULD_BUILD_REH_WEB: no
@@ -151,6 +152,7 @@ jobs:
 
       - name: Prepare assets
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # MSI needs WiX plus Windows SDK 10.0.17763 on the runner; the
           # EXE installers and the ZIP are sufficient, so skip the MSI.
           SHOULD_BUILD_MSI: no
