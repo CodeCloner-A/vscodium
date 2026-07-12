@@ -6,7 +6,7 @@ Dieser Fork enthält eine Built-in-Extension **`vscodium-agent`**, die VSCodium 
 
 Der Agent arbeitet in einem Plan-→-Werkzeug-→-Iterations-Loop mit Projektkontext (Dateibaum, Suche, Diagnostics) statt isolierter Dateien. Er kann Code generieren und ergänzen, bestehenden Code refactoren, Fehler suchen und beheben, mehrere Dateien konsistent anpassen sowie Tests und Kommandos ausführen und auf Basis der Ausgabe nachbessern, bis sie grün sind.
 
-Werkzeuge des Agenten: `list_files`, `read_file`, `search_project`, `write_file`, `replace_in_file`, `delete_file`, `run_command`, `get_diagnostics`, `task_complete`.
+Werkzeuge des Agenten: `list_files`, `read_file`, `search_project`, `write_file`, `replace_in_file`, `delete_file`, `run_command`, `get_recent_activity`, `get_diagnostics`, `task_complete`.
 
 ## Wo der Code liegt (Build-Integration)
 
@@ -48,6 +48,25 @@ Kommandopalette: **„Agent: Verbindung zu Firebase AI Logic testen"**. Bei „A
 | `vscodiumAgent.terminal.mode` | `captured` | `terminal` = Agent-Kommandos sichtbar im „Agent“-Terminal (Shell-Integration nötig) |
 | `vscodiumAgent.maxIterations` | `24` | Schrittlimit pro Aufgabe (Drift-Schutz) |
 | `vscodiumAgent.commandTimeoutSec` | `180` | Timeout für Test-/Buildläufe |
+| `vscodiumAgent.proxy.url` | Cloud-Run-URL | Agent-Proxy für den SaaS-Betrieb (siehe `docs/agent-proxy.md`) |
+| `vscodiumAgent.auth.googleClientId` / `…Secret` | – | OAuth-Client (Typ „Desktop-App“) für die Google-Anmeldung |
+
+## SaaS-Login (Phase S)
+
+Einmalige Einrichtung: Zuerst den **Firebase Web-API-Key** hinterlegen (Kommando
+„Agent: Firebase API-Key setzen“ — ohne ihn bricht die Anmeldung sofort ab). Dann in der
+Firebase Console **Authentication → Sign-in method → Google** aktivieren; in der GCP
+Console **APIs & Dienste → Anmeldedaten → OAuth-Client-ID → Desktop-App** anlegen und
+ID + Secret in die Einstellungen eintragen (Desktop-Client-Secrets gelten laut Google-Doku
+nicht als vertraulich — die Sicherheit liefern PKCE + Loopback).
+
+Danach: Kommando **„Agent: Mit Google anmelden“** (oder Klick auf den Status in der
+Chat-Statusleiste) → Browser-Anmeldung → fertig. Die Anmeldung wartet maximal 5 Minuten
+auf die Browser-Antwort und lässt sich über die Fortschritts-Benachrichtigung abbrechen.
+**„Agent: Proxy-Verbindung testen“** prüft die komplette Kette IDE → Proxy →
+Modell-Katalog. Der Refresh-Token liegt in der SecretStorage (das kurzlebige ID-Token
+nur im Speicher); „Agent: Abmelden“ löscht ihn. Ein Wechsel des Web-API-Keys
+(= Projektwechsel) meldet automatisch ab.
 
 ## Bedienung
 

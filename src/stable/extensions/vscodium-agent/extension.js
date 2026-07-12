@@ -11,6 +11,7 @@ const { AgentCodeActionProvider } = require('./ui/codeActions');
 const { DIFF_SCHEME, EXCLUDED_DIRS } = require('./lib/workspaceHost');
 const { ActivityIndex } = require('./lib/activityIndex');
 const { createLogger } = require('./lib/logger');
+const { AuthManager, AUTH_SECRET_KEY } = require('./lib/authManager');
 
 const ACTIVITY_STATE_KEY = 'vscodiumAgent.activity.v1';
 
@@ -26,6 +27,21 @@ function activate(context) {
 	wireActivityTracking(context, activity);
 
 	const provider = new ChatViewProvider(context, activity, logger);
+
+	// SaaS-Anmeldung (Phase S): Google-Login, Refresh-Token in SecretStorage.
+	const auth = new AuthManager({ secrets: context.secrets, log: logger });
+	provider.auth = auth;
+	/** @type {AbortController|null} laufender Anmeldeversuch */
+	let signInFlow = null;
+
+	// Anmeldung/Abmeldung aus einem anderen Fenster übernehmen (SecretStorage ist geteilt,
+	// jedes Fenster hält aber einen eigenen Extension-Host mit eigenem Cache).
+	context.subscriptions.push(context.secrets.onDidChange((e) => {
+		if (e.key === AUTH_SECRET_KEY) {
+			auth.invalidate();
+			void provider._sendInit();
+		}
+	}));
 
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider, {
@@ -54,14 +70,23 @@ function activate(context) {
 				placeHolder: 'AIza…'
 			});
 			if (value) {
+				const previous = await context.secrets.get(SECRET_KEY);
 				await context.secrets.store(SECRET_KEY, value.trim());
-				void vscode.window.showInformationMessage('Firebase API-Key gespeichert (SecretStorage).');
+				// Anderer Key = anderes Firebase-Projekt: Tokens des alten Projekts sind
+				// dort wertlos – Anmeldung zurücksetzen statt kryptischer Refresh-Fehler.
+				if (previous && previous !== value.trim() && await auth.isSignedIn()) {
+					await auth.signOut();
+					void vscode.window.showInformationMessage('Firebase API-Key gespeichert – bitte erneut mit Google anmelden (Projektwechsel).');
+				} else {
+					void vscode.window.showInformationMessage('Firebase API-Key gespeichert (SecretStorage).');
+				}
 				void provider._sendInit();
 			}
 		}),
 
 		vscode.commands.registerCommand('vscodiumAgent.clearApiKey', async () => {
 			await context.secrets.delete(SECRET_KEY);
+			if (await auth.isSignedIn()) { await auth.signOut(); }
 			void vscode.window.showInformationMessage('Firebase API-Key gelöscht.');
 			void provider._sendInit();
 		}),
@@ -78,6 +103,93 @@ function activate(context) {
 						logger.error('Verbindungstest fehlgeschlagen', err);
 						const hint = err && err.hint ? ` – ${err.hint}` : '';
 						void vscode.window.showErrorMessage(`Verbindung fehlgeschlagen: ${err.message}${hint}`);
+					}
+				}
+			);
+		}),
+
+		vscode.commands.registerCommand('vscodiumAgent.signIn', async () => {
+			const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
+			const clientId = cfg.get('auth.googleClientId', '');
+			const clientSecret = cfg.get('auth.googleClientSecret', '');
+			const apiKey = await context.secrets.get(SECRET_KEY);
+			if (!apiKey) {
+				void vscode.window.showErrorMessage('Zuerst den Firebase Web-API-Key setzen („Agent: Firebase API-Key setzen“).');
+				return;
+			}
+			if (!clientId || !clientSecret) {
+				const action = await vscode.window.showErrorMessage(
+					'OAuth-Client fehlt: In der GCP Console einen „Desktop-App“-OAuth-Client anlegen und in den Einstellungen eintragen.',
+					'Einstellungen öffnen'
+				);
+				if (action) { void vscode.commands.executeCommand('workbench.action.openSettings', 'vscodiumAgent.auth'); }
+				return;
+			}
+			// Nur ein Anmeldeversuch zur Zeit: ein neuer bricht den alten ab
+			// (verhindert parallele Loopback-Server und verspätete Fehler-Toasts).
+			if (signInFlow) { signInFlow.abort(); }
+			const flow = new AbortController();
+			signInFlow = flow;
+			await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'Google-Anmeldung im Browser – bitte dort fortfahren…', cancellable: true },
+				async (_progress, token) => {
+					token.onCancellationRequested(() => flow.abort());
+					try {
+						const { email } = await auth.signIn({
+							clientId, clientSecret, apiKey,
+							signal: flow.signal,
+							openBrowser: (url) => vscode.env.openExternal(vscode.Uri.parse(url))
+						});
+						void vscode.window.showInformationMessage(`Angemeldet als ${email || 'unbekannt'}.`);
+					} catch (err) {
+						if (!flow.signal.aborted) {
+							logger.error('Anmeldung fehlgeschlagen', err);
+							void vscode.window.showErrorMessage(`Anmeldung fehlgeschlagen: ${err.message}`);
+						}
+					} finally {
+						if (signInFlow === flow) { signInFlow = null; }
+					}
+					void provider._sendInit();
+				}
+			);
+		}),
+
+		vscode.commands.registerCommand('vscodiumAgent.signOut', async () => {
+			try {
+				await auth.signOut();
+				void vscode.window.showInformationMessage('Abgemeldet.');
+			} catch (err) {
+				logger.error('Abmelden fehlgeschlagen', err);
+				void vscode.window.showErrorMessage(`Abmelden fehlgeschlagen: ${err.message}`);
+			}
+			void provider._sendInit();
+		}),
+
+		vscode.commands.registerCommand('vscodiumAgent.testProxy', async () => {
+			const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
+			const proxyUrl = String(cfg.get('proxy.url', '')).replace(/\/+$/, '');
+			if (!proxyUrl) {
+				void vscode.window.showErrorMessage('Keine Proxy-URL konfiguriert (vscodiumAgent.proxy.url).');
+				return;
+			}
+			const apiKey = await context.secrets.get(SECRET_KEY);
+			if (!apiKey) {
+				void vscode.window.showErrorMessage('Zuerst den Firebase Web-API-Key setzen („Agent: Firebase API-Key setzen“).');
+				return;
+			}
+			await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'Teste Agent-Proxy…' },
+				async () => {
+					try {
+						const idToken = await auth.getIdToken(apiKey);
+						const res = await fetch(`${proxyUrl}/v1/models`, { headers: { 'Authorization': `Bearer ${idToken}` } });
+						if (!res.ok) { throw new Error(`Proxy antwortet mit HTTP ${res.status}`); }
+						const json = await res.json();
+						const ids = (json.models || []).map(m => m.id).join(', ');
+						void vscode.window.showInformationMessage(`Proxy OK – Angebot: ${ids || '(leer)'}`);
+					} catch (err) {
+						logger.error('Proxy-Test fehlgeschlagen', err);
+						void vscode.window.showErrorMessage(`Proxy-Test fehlgeschlagen: ${err.message}`);
 					}
 				}
 			);

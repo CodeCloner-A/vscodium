@@ -31,6 +31,8 @@ class ChatViewProvider {
 		this.context = context;
 		this.activity = activity || null;
 		this.log = logger || NOOP_LOGGER;
+		/** @type {import('../lib/authManager').AuthManager|null} wird vom Einstiegspunkt gesetzt */
+		this.auth = null;
 		/** @type {vscode.WebviewView|undefined} */
 		this.view = undefined;
 		this.running = false;
@@ -311,6 +313,19 @@ class ChatViewProvider {
 			case 'openSettings':
 				void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:vscodium.vscodium-agent');
 				break;
+			case 'authClick': {
+				if (this.auth && await this.auth.isSignedIn()) {
+					const choice = await vscode.window.showQuickPick(
+						[{ label: '$(plug) Proxy-Verbindung testen', action: 'vscodiumAgent.testProxy' },
+						{ label: '$(sign-out) Abmelden', action: 'vscodiumAgent.signOut' }],
+						{ title: `Angemeldet als ${await this.auth.email()}` }
+					);
+					if (choice) { void vscode.commands.executeCommand(choice.action); }
+				} else {
+					void vscode.commands.executeCommand('vscodiumAgent.signIn');
+				}
+				break;
+			}
 			case 'setApiKey':
 				void vscode.commands.executeCommand('vscodiumAgent.setApiKey');
 				break;
@@ -329,6 +344,9 @@ class ChatViewProvider {
 		if (model && !models.some(m => m.id === model)) {
 			models.push({ id: model, label: `${model} (aus den Einstellungen)`, region: fixedLocation(model) });
 		}
+		const auth = this.auth
+			? { signedIn: await this.auth.isSignedIn(), email: await this.auth.email() }
+			: undefined;
 		this._post({
 			type: 'init',
 			state: {
@@ -336,6 +354,7 @@ class ChatViewProvider {
 				projectId: cfg.projectId,
 				model,
 				models,
+				auth,
 				approvalMode: cfg.approvalMode,
 				running: this.running,
 				items: this.items,
@@ -626,7 +645,7 @@ class ChatViewProvider {
 	</div>
 	<div id="messages"></div>
 	<div id="composer">
-		<div id="statusline"><span id="status-project"></span><select id="model-select" title="Gemini-Modell wählen"></select><span id="status-mode"></span></div>
+		<div id="statusline"><span id="status-project"></span><select id="model-select" title="Gemini-Modell wählen"></select><span id="status-mode"></span><span id="status-auth" title="Anmeldestatus – klicken für Anmelden/Abmelden"></span></div>
 		<textarea id="input" rows="3" placeholder="Aufgabe beschreiben … (Enter = Senden, Shift+Enter = Zeile)"></textarea>
 		<div id="actions">
 			<button id="btn-send">Senden</button>

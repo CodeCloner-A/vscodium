@@ -1,6 +1,6 @@
 # Roadmap — VSCodium Agent
 
-Abgeleitet aus der Feature-Chronologie von Cursor (Changelog 2023–2025), gemappt auf den Ist-Zustand dieses Forks (Stand: 12. Juli 2026, Extension v0.4.0, Basis VS Code 1.121.0). Cursor-Referenzen in Klammern zeigen, wann Cursor das jeweilige Feature gebaut hat — als Beleg für die Reihenfolge, nicht als Kopiervorlage.
+Abgeleitet aus der Feature-Chronologie von Cursor (Changelog 2023–2025), gemappt auf den Ist-Zustand dieses Forks (Stand: 12. Juli 2026, Extension v0.6.0, Basis VS Code 1.121.0). Cursor-Referenzen in Klammern zeigen, wann Cursor das jeweilige Feature gebaut hat — als Beleg für die Reihenfolge, nicht als Kopiervorlage.
 
 > **Kurswechsel 07/2026 — SaaS:** Der Fork wird als Dienst betrieben. Firebase bleibt das Rückgrat: Auth für den Login, Firestore für Chatverläufe, Nutzerdaten, Tarife und Metering. Nur die KI-Kommunikation läuft über einen Cloud-Run-Proxy als Türsteher (Vertex AI direkt: Gemini plus Claude via MaaS, SSE-Streaming). Der bisherige API-Key-Pfad (BYOK) entfällt ersatzlos, sobald der Proxy produktiv ist. Die früheren Leitplanken „Kein Login-Zwang“ und „kein SaaS-Modell“ sind damit bewusst aufgehoben — siehe Phase S.
 
@@ -30,7 +30,7 @@ Abgeleitet aus der Feature-Chronologie von Cursor (Changelog 2023–2025), gemap
 | Diagnostics-Zugriff (`get_diagnostics`) | ✅ |
 | Editor-Integration: Inline-Edit (Strg+I, Streaming-Diff, partielles Annehmen), Apply-Button, Quick-Fixes, Terminal-Debug | ✅ v0.4.0 (`lib/inlineEdit.js`, `ui/codeActions.js`) |
 | Modell-Picker in der Chat-Statusleiste | ✅ v0.4.0 (`ui/chatViewProvider.js`) |
-| 13 Settings, SecretStorage, `testConnection` | ✅ |
+| 16 Settings, SecretStorage, `testConnection` | ✅ |
 | Headless-Test | ✅ lokal + CI (`.github/workflows/extension-test.yml`) |
 
 Damit ist der Fork agent-first — Cursor erreichte vergleichbare Agent-Fähigkeiten erst Ende 2024 (0.43/0.44). Was fehlt, sind die Komfort- und Kontext-Schichten, die Cursor 2023 zuerst gebaut hat. Genau die adressieren Phasen 2–3 — nach dem SaaS-Fundament (Phase S).
@@ -43,7 +43,7 @@ Damit ist der Fork agent-first — Cursor erreichte vergleichbare Agent-Fähigke
 |---|---|---|---|
 | 0 | Fundament härten | 2–3 Wochen | ✅ abgeschlossen (esbuild bewusst zurückgestellt) |
 | 1 | Editor-Integration (Inline-Edit, Fix-Flows) | 4–6 Wochen | ✅ abgeschlossen (v0.4.0) |
-| **S** | **SaaS-Fundament (Auth, Proxy, Abrechnung)** | 6–8 Wochen | ⬅ nächster Schritt |
+| **S** | **SaaS-Fundament (Auth, Proxy, Abrechnung)** | 6–8 Wochen | in Arbeit — 3/10 erledigt (Modell-Katalog v0.5.0, Proxy v1, Auth-Login v0.6.0) |
 | 2 | Kontext-System (@-Mentions, Indexing, Ignore) | 6–8 Wochen | offen — setzt Phase S voraus |
 | 3 | Regeln & Steuerung (Rules, Modi, Modell-Picker) | 3–4 Wochen | Modell-Picker vorgezogen (v0.4.0), Rest offen |
 | 4 | Agent-Ausbau (Checkpoints, Queue, MCP) | 6–8 Wochen | offen |
@@ -86,7 +86,7 @@ Beides löst ein schlankes Proxy-Backend, das Vertex AI direkt spricht. Firebase
 - [x] **Modell-Katalog + Auto-Routing (Client, sofort lieferbar):** `GEMINI_MODELS` um Metadaten erweitern, `buildClient()` löst die Region automatisch pro Modell auf; `gemini-3.5-flash` in den Picker (über AI Logic zwingend `global`, Anzeige als Suffix + Tooltip); `firebase.location` wird zum Experten-Override degradiert. Läuft übergangsweise noch über den Key-Pfad; das Routing wandert später in den Proxy. *(07/2026, v0.5.0: `lib/modelCatalog.js` — Katalog mit `vertexLocations`-Metadaten, `resolveRoute()` in `buildClient()` (greift auch für Inline-Edit und `testConnection`), Global-Heuristik für unbekannte 3.x-Modelle, Headless-Tests.)*
 - [x] **Proxy-Backend v1 (Cloud Run):** Endpunkte für `generateContent`/`streamGenerateContent` (SSE-Durchleitung), Vertex AI direkt mit Service-Account; Modell→Region-Routing serverseitig (`gemini-3.5-flash` → `eu`-Multiregion, 2.5er → EU-Einzelregion); Modell-Katalog kommt vom Server, der Picker zeigt, was der Dienst anbietet. *(07/2026: implementiert in `agent-proxy/` — dependency-freier Node-Server; Firebase-ID-Token-Prüfung (RS256, auth_time, Cert-Cache mit Timeout/Dedup), Allowlist-Katalog, rep-Host für `eu` (europe-west2 gemieden: Allowlist-/PT-Gate, UK ≠ EU), Nutzer- und Gesamt-Rate-Limit fail-closed, Metering-Logs ohne Inhalte; Headless-Tests, Dockerfile, Anleitung `docs/agent-proxy.md`. Deployt auf Cloud Run europe-west1, Auth-Gate live verifiziert; Liveness-Pfad ist `/health`, weil Googles Frontend `/healthz` auf `*.run.app` abfängt.)*
 - [ ] **Proxy v2 — Partner-Modelle (Claude via MaaS):** Anthropic-Modelle aus dem Vertex Model Garden (verifiziert 07/2026: `claude-opus-4-6` GA, neuere wie Opus 4.8/Sonnet 5 verfügbar; Endpunkt `publishers/anthropic/models/…:streamRawPredict`, Body im Anthropic-Messages-Format mit `anthropic_version: "vertex-2023-10-16"`). Das Wire-Format (Messages, Tool-Use-Schema, SSE-Events) ist inkompatibel zu Gemini `generateContent` — der Proxy übersetzt in ein einheitliches Format, der Client spricht weiterhin genau ein Protokoll. Regionen: `global` oder `eu`-Multiregion (`aiplatform.eu.rep.googleapis.com`, ca. 10 % Aufpreis). Nur über den Proxy möglich: Firebase AI Logic ist Gemini-only, der Übergangs-Key-Pfad kann kein Claude.
-- [ ] **Firebase-Auth-Login in der Extension:** Browser-Redirect + Loopback (localhost) → ID-/Refresh-Token in SecretStorage; Anmeldestatus im Chat-Panel; Logout-Kommando.
+- [x] **Firebase-Auth-Login in der Extension:** Browser-Redirect + Loopback (localhost) → Refresh-Token in SecretStorage (kurzlebiges ID-Token nur im Speicher, Auto-Erneuerung); Anmeldestatus im Chat-Panel; Logout-Kommando. *(07/2026, v0.6.0: `lib/firebaseAuth.js` — OAuth für installierte Apps mit PKCE + Loopback, `signInWithIdp`, Refresh mit Rotations-Persistenz; `lib/authManager.js` — SecretStorage + Auto-Erneuerung; Statusanzeige in der Chat-Statusleiste, Kommandos Anmelden/Abmelden/„Proxy-Verbindung testen“; Einstellungen `proxy.url`, `auth.googleClientId/-Secret` (Desktop-App-OAuth-Client). Headless-Tests inkl. state-Prüfung.)*
 - [ ] **Nutzerdaten & Chat-Sync (Firestore):** Sitzungen wandern von `workspaceState` nach Firestore — pro Nutzer, geräteübergreifend; Zugriff per REST mit ID-Token, damit die Extension dependency-frei bleibt; Security Rules: jeder Nutzer liest/schreibt nur eigene Dokumente; lokaler Cache als Offline-Fallback.
 - [ ] **Metering & Quoten:** Tokenzahlen aus `usageMetadata` pro Nutzer in Firestore; Tages-/Monatsbudgets pro Tarif; harte Limits im Proxy (429 mit verständlicher Meldung im Chat).
 - [ ] **Abrechnung (Stripe):** Checkout + Customer Portal, Webhooks → Entitlements in Firestore; Free-Tier mit knappem Kontingent zum Ausprobieren.

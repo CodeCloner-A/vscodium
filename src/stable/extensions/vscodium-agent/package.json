@@ -2,7 +2,7 @@
   "name": "vscodium-agent",
   "displayName": "VSCodium Agent",
   "description": "Integrierter KI-Agent (Firebase AI Logic / Gemini): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
@@ -64,6 +64,21 @@
       {
         "command": "vscodiumAgent.testConnection",
         "title": "Verbindung zu Firebase AI Logic testen",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.signIn",
+        "title": "Mit Google anmelden",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.signOut",
+        "title": "Abmelden",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.testProxy",
+        "title": "Proxy-Verbindung testen",
         "category": "Agent"
       },
       {
@@ -172,6 +187,21 @@
           "type": "string",
           "default": "us-central1",
           "markdownDescription": "Experten-Override: Vertex-AI-Region (nur bei Backend `vertexAI`). Modelle mit festem Standort (Gemini 3.x → `global`) übersteuern diese Einstellung automatisch."
+        },
+        "vscodiumAgent.proxy.url": {
+          "type": "string",
+          "default": "https://agent-proxy-476281311476.europe-west1.run.app",
+          "markdownDescription": "Basis-URL des Agent-Proxys (Cloud Run). Der Proxy prüft die Anmeldung und routet die Modelle serverseitig (siehe `docs/agent-proxy.md`)."
+        },
+        "vscodiumAgent.auth.googleClientId": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "OAuth-Client-ID (Typ **Desktop-App**) aus der GCP Console → APIs & Dienste → Anmeldedaten. Für die Google-Anmeldung (SaaS-Login)."
+        },
+        "vscodiumAgent.auth.googleClientSecret": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Client-Secret des Desktop-App-OAuth-Clients. Laut Google-Doku bei installierten Apps **nicht vertraulich** – die Sicherheit liefern PKCE und der Loopback-Redirect."
         },
         "vscodiumAgent.model": {
           "type": "string",

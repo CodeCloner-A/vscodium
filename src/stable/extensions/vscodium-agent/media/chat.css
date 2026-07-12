@@ -203,6 +203,16 @@ code {
 
 #status-project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+#status-auth {
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 40%;
+}
+#status-auth:hover { color: var(--vscode-textLink-foreground); }
+#status-auth.signed-in { color: var(--vscode-charts-green, var(--vscode-descriptionForeground)); }
+
 #model-select {
 	flex: 1;
 	min-width: 0;

@@ -10,6 +10,7 @@
 'use strict';
 
 const assert = require('assert');
+const crypto = require('crypto');
 const { AgentRun } = require('../lib/agentController');
 const { executeTool, countOccurrences } = require('../lib/tools');
 const { buildSystemPrompt } = require('../lib/prompts');
@@ -20,6 +21,8 @@ const { buildInlineEditRequest, buildApplyRequest, extractCode, sanitizeStreamTe
 const { computeLineHunks, revertHunkInLines, splitLines } = require('../lib/lineDiff');
 const { stripAnsi, normalizeCommandApproval } = require('../lib/terminalExec');
 const { MODEL_CATALOG, pickerModels, resolveRoute, fixedLocation } = require('../lib/modelCatalog');
+const { signInWithGoogle, refreshIdToken, createPkce, decodeJwtPayload } = require('../lib/firebaseAuth');
+const { AuthManager, AUTH_SECRET_KEY } = require('../lib/authManager');
 
 // ── Mock-Host (In-Memory-Dateisystem) ──────────────────────────────────────
 
@@ -295,6 +298,203 @@ async function testModelCatalog() {
 	console.log('✔ Modell-Katalog: Picker-Einträge, Auto-Routing (Gemini 3.x → global), Overrides');
 }
 
+async function testFirebaseAuth() {
+	// PKCE: Challenge ist SHA-256 des Verifiers (base64url).
+	const pkce = createPkce();
+	assert.ok(pkce.verifier.length >= 43);
+	assert.strictEqual(
+		crypto.createHash('sha256').update(pkce.verifier).digest().toString('base64url'),
+		pkce.challenge
+	);
+
+	// JWT-Nutzlast lesen (nur Anzeige, keine Verifikation).
+	const fakeIdJwt = `h.${Buffer.from(JSON.stringify({ email: 'jwt@example.com' })).toString('base64url')}.s`;
+	assert.strictEqual(decodeJwtPayload(fakeIdJwt).email, 'jwt@example.com');
+	assert.strictEqual(decodeJwtPayload('kaputt'), null);
+
+	// Voller Anmelde-Flow: echter Loopback-Server, Browser und Netz simuliert.
+	let sentChallenge = '';
+	const fakeFetch = async (url, init) => {
+		if (url.startsWith('https://oauth2.googleapis.com/token')) {
+			const params = new URLSearchParams(init.body);
+			assert.strictEqual(params.get('code'), 'test-code');
+			assert.strictEqual(params.get('grant_type'), 'authorization_code');
+			assert.strictEqual(
+				crypto.createHash('sha256').update(params.get('code_verifier')).digest().toString('base64url'),
+				sentChallenge,
+				'PKCE-Verifier muss zur Challenge aus der Auth-URL passen'
+			);
+			return { ok: true, status: 200, json: async () => ({ id_token: 'google-id-token' }) };
+		}
+		if (url.startsWith('https://identitytoolkit.googleapis.com/')) {
+			assert.ok(url.includes('key=web-api-key'), 'API-Key muss an signInWithIdp gehen');
+			const body = JSON.parse(init.body);
+			assert.ok(body.postBody.includes('id_token=google-id-token'));
+			assert.ok(body.postBody.includes('providerId=google.com'));
+			return {
+				ok: true, status: 200,
+				json: async () => ({ idToken: 'firebase-id-token', refreshToken: 'refresh-1', email: 'nutzer@example.com', expiresIn: '3600' })
+			};
+		}
+		throw new Error(`Unerwarteter Netzaufruf: ${url}`);
+	};
+	const result = await signInWithGoogle({
+		clientId: 'cid', clientSecret: 'csec', apiKey: 'web-api-key', fetchImpl: fakeFetch,
+		openBrowser: async (authUrl) => {
+			const u = new URL(authUrl);
+			assert.strictEqual(u.searchParams.get('code_challenge_method'), 'S256');
+			sentChallenge = u.searchParams.get('code_challenge');
+			const redirect = u.searchParams.get('redirect_uri');
+			assert.ok(redirect.startsWith('http://127.0.0.1:'), 'Redirect muss auf den Loopback zeigen');
+			// Browser-Simulation: Google leitet mit Code und State zurück.
+			const res = await fetch(`${redirect}?code=test-code&state=${encodeURIComponent(u.searchParams.get('state'))}`);
+			assert.strictEqual(res.status, 200);
+		}
+	});
+	assert.deepStrictEqual(
+		{ idToken: result.idToken, refreshToken: result.refreshToken, email: result.email },
+		{ idToken: 'firebase-id-token', refreshToken: 'refresh-1', email: 'nutzer@example.com' }
+	);
+	assert.ok(result.expiresAt > Date.now());
+
+	// State-Mismatch (CSRF/fremder Redirect) bricht den Flow ab.
+	await assert.rejects(signInWithGoogle({
+		clientId: 'cid', clientSecret: 'csec', apiKey: 'k', fetchImpl: fakeFetch,
+		openBrowser: async (authUrl) => {
+			const redirect = new URL(authUrl).searchParams.get('redirect_uri');
+			const res = await fetch(`${redirect}?code=test-code&state=falsch`);
+			assert.strictEqual(res.status, 400);
+		}
+	}), /state/);
+
+	// Abbruch über AbortSignal: Flow endet sofort mit „abgebrochen“ und räumt auf.
+	const abortController = new AbortController();
+	await assert.rejects(signInWithGoogle({
+		clientId: 'cid', clientSecret: 'csec', apiKey: 'k', fetchImpl: fakeFetch,
+		signal: abortController.signal,
+		openBrowser: async () => { abortController.abort(); }
+	}), /abgebrochen/i);
+
+	// Ohne Web-API-Key wird die Erneuerung gar nicht erst versucht.
+	await assert.rejects(refreshIdToken({ apiKey: '', refreshToken: 'r' }), /Web-API-Key/);
+
+	// Token-Erneuerung inkl. Rotation des Refresh-Tokens.
+	const refreshed = await refreshIdToken({
+		apiKey: 'k', refreshToken: 'r-alt',
+		fetchImpl: async (url, init) => {
+			assert.ok(url.startsWith('https://securetoken.googleapis.com/v1/token'));
+			assert.strictEqual(new URLSearchParams(init.body).get('refresh_token'), 'r-alt');
+			return { ok: true, status: 200, json: async () => ({ id_token: 'id-neu', refresh_token: 'r-neu', expires_in: '3600' }) };
+		}
+	});
+	assert.deepStrictEqual(
+		{ idToken: refreshed.idToken, refreshToken: refreshed.refreshToken },
+		{ idToken: 'id-neu', refreshToken: 'r-neu' }
+	);
+
+	console.log('✔ Firebase-Auth: PKCE, Loopback-Flow, state-Prüfung, signInWithIdp, Refresh-Rotation');
+}
+
+async function testAuthManager() {
+	const store = new Map();
+	const secrets = {
+		get: async (k) => store.get(k),
+		store: async (k, v) => { store.set(k, v); },
+		delete: async (k) => { store.delete(k); }
+	};
+	let tNow = Date.now();
+	let refreshCalls = 0;
+	const fetchImpl = async () => {
+		refreshCalls++;
+		return { ok: true, status: 200, json: async () => ({ id_token: `id-${refreshCalls}`, refresh_token: `r-${refreshCalls}`, expires_in: '3600' }) };
+	};
+
+	// Abgemeldet: Status falsch, Token-Abruf wirft verständlich.
+	const anon = new AuthManager({ secrets, now: () => tNow, fetchImpl });
+	assert.strictEqual(await anon.isSignedIn(), false);
+	await assert.rejects(anon.getIdToken('k'), /angemeldet/i);
+
+	// Angemeldeter Zustand (Refresh-Token liegt in der SecretStorage).
+	await secrets.store(AUTH_SECRET_KEY, JSON.stringify({ refreshToken: 'r-0', email: 'e@example.com' }));
+	const mgr = new AuthManager({ secrets, now: () => tNow, fetchImpl });
+	assert.strictEqual(await mgr.isSignedIn(), true);
+	assert.strictEqual(await mgr.email(), 'e@example.com');
+	assert.strictEqual(await mgr.getIdToken('k'), 'id-1');
+	assert.strictEqual(await mgr.getIdToken('k'), 'id-1', 'zweiter Abruf muss aus dem Cache kommen');
+	assert.strictEqual(refreshCalls, 1);
+	assert.ok(store.get(AUTH_SECRET_KEY).includes('r-1'), 'rotierter Refresh-Token muss persistiert sein');
+
+	// Nach Ablauf wird erneuert.
+	tNow += 3600 * 1000 + 1;
+	assert.strictEqual(await mgr.getIdToken('k'), 'id-2');
+	assert.strictEqual(refreshCalls, 2);
+
+	// Cache ist pro API-Key: anderer Key (= anderes Projekt) erzwingt neue Erneuerung.
+	assert.strictEqual(await mgr.getIdToken('anderer-key'), 'id-3');
+	assert.strictEqual(refreshCalls, 3);
+
+	// Abmelden räumt alles weg.
+	await mgr.signOut();
+	assert.strictEqual(await mgr.isSignedIn(), false);
+	assert.ok(!store.has(AUTH_SECRET_KEY));
+
+	// Race: Abmelden WÄHREND einer laufenden Erneuerung darf nicht rückgängig gemacht werden.
+	await secrets.store(AUTH_SECRET_KEY, JSON.stringify({ refreshToken: 'r-x', email: 'x@example.com' }));
+	let release;
+	const gate = new Promise((resolve) => { release = resolve; });
+	const racy = new AuthManager({
+		secrets, now: () => tNow,
+		fetchImpl: async () => {
+			await gate;
+			return { ok: true, status: 200, json: async () => ({ id_token: 'spät', refresh_token: 'r-rotiert', expires_in: '3600' }) };
+		}
+	});
+	const pending = racy.getIdToken('k');
+	pending.catch(() => { }); // Ablehnung kommt erst nach dem signOut
+	await new Promise((resolve) => setImmediate(resolve)); // Erneuerung ist jetzt in flight
+	await racy.signOut();
+	release();
+	await assert.rejects(pending, /angemeldet/i);
+	assert.strictEqual(await racy.isSignedIn(), false, 'verspätete Erneuerung darf das Abmelden nicht aufheben');
+	assert.ok(!store.has(AUTH_SECRET_KEY), 'rotierter Token darf nach signOut nicht zurückgeschrieben werden');
+
+	// Transienter SecretStorage-Fehler (z. B. gesperrter Keyring) wird nicht memoiert.
+	let keyringLocked = true;
+	const flaky = {
+		get: async () => {
+			if (keyringLocked) { throw new Error('Keyring gesperrt'); }
+			return JSON.stringify({ refreshToken: 'r', email: 'e@example.com' });
+		},
+		store: async () => { }, delete: async () => { }
+	};
+	const retrying = new AuthManager({ secrets: flaky, now: () => tNow, fetchImpl });
+	assert.strictEqual(await retrying.isSignedIn(), false, 'gesperrter Keyring → vorerst abgemeldet');
+	keyringLocked = false;
+	assert.strictEqual(await retrying.isSignedIn(), true, 'nächster Zugriff liest erneut statt dauerhaft abgemeldet zu bleiben');
+
+	// Formprüfung: parsebarer, aber unbrauchbarer Eintrag gilt als abgemeldet.
+	const junkStore = new Map([[AUTH_SECRET_KEY, JSON.stringify({ foo: 1 })]]);
+	const junky = new AuthManager({
+		secrets: { get: async (k) => junkStore.get(k), store: async () => { }, delete: async () => { } },
+		now: () => tNow, fetchImpl
+	});
+	assert.strictEqual(await junky.isSignedIn(), false);
+
+	// invalidate(): extern geänderte Secrets (zweites Fenster) werden neu gelesen.
+	const shared = new Map([[AUTH_SECRET_KEY, JSON.stringify({ refreshToken: 'r-a', email: 'a@example.com' })]]);
+	const windowB = new AuthManager({
+		secrets: { get: async (k) => shared.get(k), store: async (k, v) => { shared.set(k, v); }, delete: async (k) => { shared.delete(k); } },
+		now: () => tNow, fetchImpl
+	});
+	assert.strictEqual(await windowB.isSignedIn(), true);
+	shared.delete(AUTH_SECRET_KEY); // „anderes Fenster“ meldet ab
+	assert.strictEqual(await windowB.isSignedIn(), true, 'ohne invalidate bleibt der Cache stehen');
+	windowB.invalidate();
+	assert.strictEqual(await windowB.isSignedIn(), false, 'nach invalidate zählt der echte Speicherstand');
+
+	console.log('✔ Auth-Verwaltung: Cache pro API-Key, Ablauf-Erneuerung, Rotation, signOut-Race, Keyring-Retry, invalidate');
+}
+
 async function testActivityIndex() {
 	let now = 1000000;
 	const idx = new ActivityIndex(() => now);
@@ -566,6 +766,8 @@ async function main() {
 	await testRejectionFlow();
 	await testMaxIterationsGuard();
 	await testModelCatalog();
+	await testFirebaseAuth();
+	await testAuthManager();
 	await testActivityIndex();
 	await testLogger();
 	await testInlineEdit();

@@ -12,6 +12,7 @@
 	const elStatusProject = document.getElementById('status-project');
 	const elModelSelect = document.getElementById('model-select');
 	const elStatusMode = document.getElementById('status-mode');
+	const elStatusAuth = document.getElementById('status-auth');
 	const elSessionSelect = document.getElementById('session-select');
 	const elNewSession = document.getElementById('btn-new-session');
 	const elDelSession = document.getElementById('btn-del-session');
@@ -59,6 +60,19 @@
 	elModelSelect.addEventListener('change', () => {
 		vscode.postMessage({ type: 'setModel', model: elModelSelect.value });
 	});
+
+	// ── Anmeldestatus (SaaS-Login, Phase S) ───────────────────────────────────
+
+	function renderAuth(auth) {
+		if (!auth) {
+			elStatusAuth.textContent = '';
+			return;
+		}
+		elStatusAuth.textContent = auth.signedIn ? `⦿ ${auth.email || 'angemeldet'}` : '○ Anmelden';
+		elStatusAuth.classList.toggle('signed-in', Boolean(auth.signedIn));
+	}
+
+	elStatusAuth.addEventListener('click', () => vscode.postMessage({ type: 'authClick' }));
 	elDelSession.addEventListener('click', () => {
 		if (elSessionSelect.value) {
 			vscode.postMessage({ type: 'deleteSession', id: elSessionSelect.value });
@@ -278,6 +292,7 @@
 				elSetup.classList.toggle('hidden', msg.state.configured);
 				elStatusProject.textContent = msg.state.projectId;
 				renderModels(msg.state.models, msg.state.model);
+				renderAuth(msg.state.auth);
 				elStatusMode.textContent = msg.state.approvalMode === 'review' ? 'Review-Modus' : 'Auto-Modus';
 				renderSessions(msg.state.sessions || [], msg.state.activeSessionId);
 				for (const item of msg.state.items) { render(item); }

@@ -4,6 +4,13 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.6.0] – 2026-07-12
+
+### Hinzugefügt
+- **Google-Anmeldung (SaaS-Login, Phase S):** Kommando „Agent: Mit Google anmelden“ öffnet den Browser (OAuth für installierte Apps: PKCE + Loopback-Redirect auf 127.0.0.1); das Google-Konto wird per `signInWithIdp` bei Firebase Auth eingelöst. Der Refresh-Token liegt in der SecretStorage, das kurzlebige ID-Token wird automatisch erneuert (Token-Rotation wird persistiert). Anmeldestatus in der Chat-Statusleiste — Klick meldet an bzw. öffnet das Konto-Menü (Abmelden, Proxy-Test). Neue Kommandos: „Abmelden“, „Proxy-Verbindung testen“ (End-to-End-Probe gegen den Cloud-Run-Proxy).
+- Neue Einstellungen: `vscodiumAgent.proxy.url` (Standard: der Cloud-Run-Proxy des Projekts) sowie `vscodiumAgent.auth.googleClientId`/`googleClientSecret` (OAuth-Client vom Typ „Desktop-App“).
+- Robustheit der Anmeldung (aus dem Security-Review): Anmeldung ist abbrechbar (Fortschritts-Benachrichtigung; ein neuer Versuch beendet den alten statt parallel zu laufen); der Loopback-Server schließt auch bei Browser-Fehlern sofort; Abmelden während einer laufenden Token-Erneuerung bleibt endgültig (kein Zurückschreiben rotierter Tokens); Anmeldestatus synchronisiert sich zwischen mehreren Fenstern; ein Wechsel oder Löschen des Web-API-Keys (Projektwechsel) meldet automatisch ab; transiente Keyring-Fehler werden beim nächsten Zugriff erneut versucht statt die Sitzung dauerhaft abzumelden.
+
 ## [0.5.0] – 2026-07-12
 
 ### Hinzugefügt
