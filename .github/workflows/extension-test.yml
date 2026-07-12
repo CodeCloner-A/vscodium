@@ -1,0 +1,43 @@
+name: Test - vscodium-agent
+
+on:
+  push:
+    branches:
+      - master
+      - insider
+    paths:
+      - "src/stable/extensions/**"
+      - ".github/workflows/extension-test.yml"
+  pull_request:
+    branches:
+      - "**"
+    paths:
+      - "src/stable/extensions/**"
+      - ".github/workflows/extension-test.yml"
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/stable/extensions/vscodium-agent
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Syntax check (node --check)
+        run: |
+          set -e
+          find . -name '*.js' -not -path './node_modules/*' -print0 \
+            | xargs -0 -n1 node --check
+          echo "Syntax OK"
+
+      - name: Validate package.json
+        run: node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('package.json OK')"
+
+      - name: Headless tests
+        run: node test/run.js
