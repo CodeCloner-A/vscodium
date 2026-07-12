@@ -1,0 +1,14 @@
+{
+	"name": "vscodium-agent-proxy",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Cloud-Run-Proxy des VSCodium Agent: Firebase-Auth-Türsteher vor Vertex AI (Gemini), SSE-Streaming, serverseitiges Modell→Region-Routing.",
+	"license": "MIT",
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"start": "node server.js",
+		"test": "node test/run.js"
+	}
+}
