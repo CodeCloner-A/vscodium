@@ -13,8 +13,13 @@ const assert = require('assert');
 const { AgentRun } = require('../lib/agentController');
 const { executeTool, countOccurrences } = require('../lib/tools');
 const { buildSystemPrompt } = require('../lib/prompts');
-const { normalizeModelName } = require('../lib/firebaseClient');
+const { normalizeModelName, createSseParser, mergeStreamResponses, FirebaseAiLogicClient } = require('../lib/firebaseClient');
 const { ActivityIndex } = require('../lib/activityIndex');
+const { createLogger, formatDetail, NOOP_LOGGER } = require('../lib/logger');
+const { buildInlineEditRequest, buildApplyRequest, extractCode, sanitizeStreamText, APPLY_MAX_LINES } = require('../lib/inlineEdit');
+const { computeLineHunks, revertHunkInLines, splitLines } = require('../lib/lineDiff');
+const { stripAnsi, normalizeCommandApproval } = require('../lib/terminalExec');
+const { MODEL_CATALOG, pickerModels, resolveRoute, fixedLocation } = require('../lib/modelCatalog');
 
 // ── Mock-Host (In-Memory-Dateisystem) ──────────────────────────────────────
 
@@ -235,6 +240,61 @@ async function testToolBasics() {
 	console.log('✔ Tools: read_file-Bereiche, Suche, Fehlerpfade, Modellnamen-Normalisierung');
 }
 
+async function testModelCatalog() {
+	// Katalog: eindeutige IDs, 3.5-flash enthalten, Picker-Einträge tragen die feste Region.
+	const ids = MODEL_CATALOG.map(m => m.id);
+	assert.strictEqual(new Set(ids).size, ids.length, 'Modell-IDs müssen eindeutig sein');
+	assert.ok(ids.includes('gemini-3.5-flash'));
+	const picker = pickerModels();
+	assert.strictEqual(picker.find(m => m.id === 'gemini-3.5-flash').region, 'global', 'fester Standort muss im Picker sichtbar sein');
+	assert.strictEqual(picker.find(m => m.id === 'gemini-2.5-flash').region, undefined, 'regional freie Modelle ohne Regions-Anzeige');
+
+	// vertexAI: 3.x wird auf global gepinnt, 2.5 respektiert die Location-Einstellung.
+	assert.deepStrictEqual(
+		resolveRoute('gemini-3.5-flash', { backend: 'vertexAI', location: 'us-central1' }),
+		{ backend: 'vertexAI', location: 'global', pinned: true }
+	);
+	assert.deepStrictEqual(
+		resolveRoute('gemini-3.5-flash', { backend: 'vertexAI', location: 'global' }),
+		{ backend: 'vertexAI', location: 'global', pinned: false }
+	);
+	assert.deepStrictEqual(
+		resolveRoute('gemini-2.5-flash', { backend: 'vertexAI', location: 'europe-west1' }),
+		{ backend: 'vertexAI', location: 'europe-west1', pinned: false }
+	);
+	// Unbekannte 3.x-Modelle (z. B. Previews aus den Einstellungen) greifen über die Heuristik.
+	assert.deepStrictEqual(
+		resolveRoute('gemini-3.1-pro-preview', { backend: 'vertexAI', location: 'europe-west1' }),
+		{ backend: 'vertexAI', location: 'global', pinned: true }
+	);
+	// Präfix-Schreibweisen routen identisch (normalizeModelName).
+	assert.deepStrictEqual(
+		resolveRoute('models/gemini-3.5-flash', { backend: 'vertexAI', location: 'us-central1' }),
+		{ backend: 'vertexAI', location: 'global', pinned: true }
+	);
+	// googleAI kennt keinen Standort: nichts wird gepinnt; leere Konfiguration fällt sauber zurück.
+	assert.deepStrictEqual(
+		resolveRoute('gemini-3.5-flash', { backend: 'googleAI', location: 'us-central1' }),
+		{ backend: 'googleAI', location: 'us-central1', pinned: false }
+	);
+	assert.deepStrictEqual(
+		resolveRoute('gemini-2.5-flash', {}),
+		{ backend: 'googleAI', location: 'us-central1', pinned: false }
+	);
+
+	// fixedLocation: gemeinsame Anzeige-Regel, auch für unbekannte 3.x und Präfix-Formen.
+	assert.strictEqual(fixedLocation('gemini-3-pro-preview'), 'global');
+	assert.strictEqual(fixedLocation('models/gemini-3.5-flash'), 'global');
+	assert.strictEqual(fixedLocation('gemini-2.5-flash'), undefined);
+
+	// normalizeModelName: trailing Slash ist Tippfehler-tolerant statt Default-Umleitung;
+	// nur wirklich leere Eingabe erhält den Default.
+	assert.strictEqual(normalizeModelName('gemini-3.5-flash/'), 'gemini-3.5-flash');
+	assert.strictEqual(normalizeModelName('models/'), 'models');
+	assert.strictEqual(normalizeModelName(''), 'gemini-2.5-flash');
+	console.log('✔ Modell-Katalog: Picker-Einträge, Auto-Routing (Gemini 3.x → global), Overrides');
+}
+
 async function testActivityIndex() {
 	let now = 1000000;
 	const idx = new ActivityIndex(() => now);
@@ -293,13 +353,225 @@ async function testActivityIndex() {
 	console.log('✔ Aktivitäts-Index: Frecency-Ranking, Delta seit letzter Agent-Erfassung, Persistenz, Tool');
 }
 
+async function testLogger() {
+	const lines = [];
+	const channel = {
+		info: (m) => lines.push(['info', m]),
+		warn: (m) => lines.push(['warn', m]),
+		error: (m) => lines.push(['error', m])
+	};
+	const log = createLogger(channel);
+
+	log.info('Nur Text');
+	log.warn('Mit Detail', { a: 1 });
+	const err = new Error('Kaputt');
+	err.name = 'FirebaseAiError';
+	err.status = 429;
+	err.hint = 'Später erneut versuchen';
+	log.error('API-Fehler', err);
+
+	assert.deepStrictEqual(lines[0], ['info', 'Nur Text']);
+	assert.strictEqual(lines[1][1], 'Mit Detail {"a":1}');
+	assert.ok(lines[2][1].includes('[FirebaseAiError]'), lines[2][1]);
+	assert.ok(lines[2][1].includes('(HTTP 429)'));
+	assert.ok(lines[2][1].includes('Hinweis: Später erneut versuchen'));
+
+	// Fehlerhafte Channels dürfen nie durchschlagen.
+	const broken = createLogger({ info() { throw new Error('boom'); }, warn() { }, error() { } });
+	broken.info('darf nicht werfen');
+
+	// Zirkuläre Details dürfen nicht crashen.
+	const circular = {};
+	circular.self = circular;
+	assert.strictEqual(typeof formatDetail(circular), 'string');
+
+	// No-op-Logger hat dieselbe Oberfläche.
+	NOOP_LOGGER.info('x');
+	NOOP_LOGGER.warn('x');
+	NOOP_LOGGER.error('x');
+
+	console.log('✔ Logger: Formatierung, Fehler-Details, Robustheit');
+}
+
+async function testInlineEdit() {
+	// Prompt-Aufbau: alle Bausteine landen im Request.
+	const req = buildInlineEditRequest({
+		instruction: 'Auf async/await umstellen',
+		languageId: 'javascript',
+		relPath: 'src/app.js',
+		before: 'const a = 1;',
+		selection: 'fetch(url).then(r => r.json());',
+		after: 'console.log(a);'
+	});
+	const sys = req.systemInstruction.parts[0].text;
+	const user = req.contents[0].parts[0].text;
+	assert.ok(sys.includes('ONLY the replacement code'), 'System-Prompt muss Nur-Code fordern');
+	assert.ok(user.includes('src/app.js') && user.includes('javascript'));
+	assert.ok(user.includes('--- REGION to rewrite ---') && user.includes('fetch(url)'));
+	assert.ok(user.includes('Auf async/await umstellen'));
+	assert.ok(req.generationConfig.maxOutputTokens >= 4096);
+
+	// Leere Kontexte werden benannt statt leer gelassen.
+	const req2 = buildInlineEditRequest({ instruction: 'x', languageId: 'js', relPath: 'a.js', before: '', selection: 's', after: '' });
+	const user2 = req2.contents[0].parts[0].text;
+	assert.ok(user2.includes('(start of file)') && user2.includes('(end of file)'));
+
+	// Apply-Request: Datei + Snippet enthalten.
+	const apply = buildApplyRequest({ code: 'const x = 2;', fileContent: 'const y = 1;\n', relPath: 'b.js', languageId: 'javascript' });
+	const applyUser = apply.contents[0].parts[0].text;
+	assert.ok(applyUser.includes('--- Snippet to integrate ---') && applyUser.includes('const x = 2;'));
+	assert.ok(apply.systemInstruction.parts[0].text.includes('complete new file content'));
+	assert.ok(APPLY_MAX_LINES >= 100);
+
+	// extractCode: roher Code bleibt unangetastet (inkl. Einrückung der ersten Zeile).
+	assert.strictEqual(extractCode('\tif (a) { b(); }'), '\tif (a) { b(); }');
+	// Führende Leerzeilen + trailing Whitespace fallen weg.
+	assert.strictEqual(extractCode('\n\n  code();\n\n'), '  code();');
+	// Fence mit Sprache wird ausgepackt.
+	assert.strictEqual(extractCode('```js\nconst a = 1;\n```'), 'const a = 1;');
+	// Prosa um den Fence herum wird ignoriert.
+	assert.strictEqual(extractCode('Hier die Lösung:\n```python\nx = 1\n```\nViel Erfolg!'), 'x = 1');
+	// Erster Fence gewinnt bei mehreren.
+	assert.strictEqual(extractCode('```\neins\n```\ndazwischen\n```\nzwei\n```'), 'eins');
+	// Leere Antwort → leerer String.
+	assert.strictEqual(extractCode(''), '');
+
+	// Stream-Sanitizer: öffnende Fence fällt sofort weg, auch mit Sprach-Tag.
+	assert.strictEqual(sanitizeStreamText('```js\nconst a'), 'const a');
+	// Teilweise empfangene schließende Fence wird zurückgehalten.
+	assert.strictEqual(sanitizeStreamText('const a = 1;\n``'), 'const a = 1;');
+	assert.strictEqual(sanitizeStreamText('const a = 1;\n```'), 'const a = 1;');
+	// Ohne Fences bleibt der Text (samt Einrückung) unangetastet.
+	assert.strictEqual(sanitizeStreamText('\tif (a) {'), '\tif (a) {');
+	// Führende Leerzeilen fallen weg, wachsender Text hinten bleibt.
+	assert.strictEqual(sanitizeStreamText('\n\n  x = 1\n  y ='), '  x = 1\n  y =');
+
+	console.log('✔ Inline-Edit: Prompt-Aufbau, Apply-Request, Fence-Parsing, Stream-Sanitizer');
+}
+
+async function testSseStreaming() {
+	// Parser: beliebig zerteilte Chunks, CRLF, mehrere data-Zeilen, Flush am Ende.
+	const events = [];
+	const parser = createSseParser((d) => events.push(d));
+	parser.push('data: {"a"');
+	parser.push(':1}\r\n\r\nda');
+	parser.push('ta: {"b":2}\n\ndata: X\ndata: Y');
+	parser.end();
+	assert.deepStrictEqual(events, ['{"a":1}', '{"b":2}', 'X\nY']);
+
+	// Merge: Text konkateniert, finishReason aus dem letzten Chunk, functionCalls bleiben.
+	const merged = mergeStreamResponses([
+		{ candidates: [{ content: { parts: [{ text: 'Hal' }] } }] },
+		{ candidates: [{ content: { parts: [{ text: 'lo' }, { functionCall: { name: 'f', args: {} } }] }, finishReason: 'STOP' }] }
+	]);
+	assert.strictEqual(merged.candidates[0].content.parts[0].text, 'Hallo');
+	assert.strictEqual(merged.candidates[0].content.parts[1].functionCall.name, 'f');
+	assert.strictEqual(merged.candidates[0].finishReason, 'STOP');
+
+	// Voller Streaming-Aufruf gegen ein gemocktes fetch (SSE-Body als async iterable).
+	const sse = [
+		'data: {"candidates":[{"content":{"parts":[{"text":"const a"}]}}]}\r\n\r\n',
+		'data: {"candidates":[{"content":{"parts":[{"text":" = 1;"}]},"finishReason":"STOP"}]}\r\n\r\n'
+	];
+	const client = new FirebaseAiLogicClient({
+		apiKey: 'k', projectId: 'p', model: 'gemini-2.5-flash',
+		fetchImpl: async () => ({
+			ok: true,
+			body: (async function* () {
+				for (const part of sse) { yield Buffer.from(part, 'utf8'); }
+			})()
+		})
+	});
+	const pieces = [];
+	const response = await client.generateContentStream({ contents: [] }, undefined, (t) => pieces.push(t));
+	assert.deepStrictEqual(pieces, ['const a', ' = 1;']);
+	assert.strictEqual(merged.candidates[0].finishReason, 'STOP');
+	assert.strictEqual(response.candidates[0].content.parts[0].text, 'const a = 1;');
+
+	console.log('✔ SSE-Streaming: Parser (zerteilte Chunks), Chunk-Merge, generateContentStream');
+}
+
+async function testLineDiff() {
+	// Identisch → keine Hunks.
+	assert.deepStrictEqual(computeLineHunks('a\nb', 'a\nb'), []);
+	// CRLF vs LF ist zeilenweise identisch.
+	assert.deepStrictEqual(computeLineHunks('a\r\nb', 'a\nb'), []);
+
+	// Eine geänderte Zeile in der Mitte.
+	const change = computeLineHunks('a\nb\nc', 'a\nX\nc');
+	assert.deepStrictEqual(change, [{ newStart: 1, newCount: 1, oldLines: ['b'] }]);
+
+	// Reine Einfügung.
+	const insert = computeLineHunks('a\nc', 'a\nb\nc');
+	assert.deepStrictEqual(insert, [{ newStart: 1, newCount: 1, oldLines: [] }]);
+
+	// Reine Löschung (Einfügepunkt vor Zeile 1 des neuen Texts).
+	const del = computeLineHunks('a\nb\nc', 'a\nc');
+	assert.deepStrictEqual(del, [{ newStart: 1, newCount: 0, oldLines: ['b'] }]);
+
+	// Rekonstruktions-Invariante: Hunks von hinten nach vorn zurückrollen → alter Text.
+	const cases = [
+		['a\nb\nc\nd\ne', 'a\nX\nc\nY\nZ\ne'],
+		['', 'neu'],
+		['alt', ''],
+		['f1\nf2\nf3', 'g1\ng2'],
+		['gleich\nbleibt\ngleich', 'gleich\nbleibt\ngleich\nplus'],
+		['x\ny\nz', 'z\ny\nx']
+	];
+	for (const [oldText, newText] of cases) {
+		const hunks = computeLineHunks(oldText, newText);
+		const lines = splitLines(newText);
+		for (const h of hunks.slice().reverse()) { revertHunkInLines(lines, h); }
+		assert.strictEqual(lines.join('\n'), oldText, `Rekonstruktion fehlgeschlagen für ${JSON.stringify([oldText, newText])}`);
+	}
+
+	// Hunk-Positionen zeigen in den neuen Text.
+	const multi = computeLineHunks('k1\nk2\nk3\nk4', 'k1\nA\nB\nk3\nC');
+	for (const h of multi) {
+		assert.ok(h.newStart >= 0 && h.newStart <= 5);
+	}
+
+	console.log('✔ Zeilen-Diff: Hunks (Änderung/Einfügung/Löschung), Rekonstruktions-Invariante');
+}
+
+async function testTerminalHelpers() {
+	// ANSI: Farben, Cursor-Sequenzen, OSC (Shell-Integration-Marker), CR-Übermalung.
+	assert.strictEqual(stripAnsi('\x1b[32mgrün\x1b[0m'), 'grün');
+	assert.strictEqual(stripAnsi('\x1b]633;A\x07ausgabe\x1b]633;B\x07'), 'ausgabe');
+	assert.strictEqual(stripAnsi('a\x1b[2Kb'), 'ab');
+	assert.strictEqual(stripAnsi('fortschritt 10%\rfertig      \n'), 'fertig      \n');
+	assert.strictEqual(stripAnsi('zeile\r\n'), 'zeile\n');
+
+	// Freigabe-Normalisierung: Boolean-Altpfad, Objekt, editiertes Kommando nur bei Annahme.
+	assert.deepStrictEqual(normalizeCommandApproval(true, 'npm test'), { approved: true, command: 'npm test' });
+	assert.deepStrictEqual(normalizeCommandApproval(false, 'npm test'), { approved: false, command: 'npm test' });
+	assert.deepStrictEqual(
+		normalizeCommandApproval({ approved: true, command: ' npm test -- --grep x ' }, 'npm test'),
+		{ approved: true, command: 'npm test -- --grep x' }
+	);
+	assert.deepStrictEqual(
+		normalizeCommandApproval({ accept: false, command: 'rm -rf /' }, 'npm test'),
+		{ approved: false, command: 'npm test' }
+	);
+	assert.deepStrictEqual(normalizeCommandApproval({ approved: true, command: '' }, 'npm test'),
+		{ approved: true, command: 'npm test' });
+
+	console.log('✔ Terminal-Helfer: ANSI-Strip, Freigabe-Normalisierung (editierbare Kommandos)');
+}
+
 async function main() {
 	await testToolBasics();
 	await testReplaceUniqueness();
 	await testFullAgentLoop();
 	await testRejectionFlow();
 	await testMaxIterationsGuard();
+	await testModelCatalog();
 	await testActivityIndex();
+	await testLogger();
+	await testInlineEdit();
+	await testSseStreaming();
+	await testLineDiff();
+	await testTerminalHelpers();
 	console.log('\nAlle Tests bestanden.');
 }
 

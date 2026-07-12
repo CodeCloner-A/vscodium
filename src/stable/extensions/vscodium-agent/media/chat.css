@@ -134,6 +134,20 @@ code {
 
 .card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .card-head .path { font-family: var(--vscode-editor-font-family, monospace); }
+
+/* Editierbares Kommando (solange die Freigabe aussteht) */
+.cmd-edit {
+	flex: 1;
+	min-width: 120px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+	border-radius: 3px;
+	padding: 2px 6px;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.95em;
+}
+.cmd-edit:focus { outline: 1px solid var(--vscode-focusBorder); }
 .card-sub { color: var(--vscode-descriptionForeground); margin: 4px 0 6px; font-size: 0.92em; }
 .card-sub .lines { opacity: 0.8; }
 
@@ -181,8 +195,24 @@ code {
 #statusline {
 	display: flex;
 	justify-content: space-between;
+	align-items: center;
+	gap: 8px;
 	font-size: 0.85em;
 	color: var(--vscode-descriptionForeground);
+}
+
+#status-project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#model-select {
+	flex: 1;
+	min-width: 0;
+	background: var(--vscode-dropdown-background, var(--vscode-input-background));
+	color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+	border-radius: 4px;
+	padding: 2px 4px;
+	font-family: inherit;
+	font-size: inherit;
 }
 
 #input {
@@ -230,3 +260,10 @@ button.danger {
 }
 
 button.danger:hover { background: rgba(248, 81, 73, 0.12); }
+
+/* Codeblöcke mit Aktionen */
+.codeblock { position: relative; }
+.codeblock pre { margin: 6px 0 2px; }
+.code-actions { display: flex; gap: 6px; justify-content: flex-end; margin-bottom: 6px; }
+.code-actions button { padding: 2px 8px; font-size: 0.85em; }
+body.running .code-actions button[data-act="apply-code"] { opacity: 0.5; cursor: default; }

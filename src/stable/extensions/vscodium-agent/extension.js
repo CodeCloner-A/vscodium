@@ -6,17 +6,26 @@
 
 const vscode = require('vscode');
 const { ChatViewProvider, SECRET_KEY } = require('./ui/chatViewProvider');
+const { InlineEditController } = require('./ui/inlineEditController');
+const { AgentCodeActionProvider } = require('./ui/codeActions');
 const { DIFF_SCHEME, EXCLUDED_DIRS } = require('./lib/workspaceHost');
 const { ActivityIndex } = require('./lib/activityIndex');
+const { createLogger } = require('./lib/logger');
 
 const ACTIVITY_STATE_KEY = 'vscodiumAgent.activity.v1';
 
 /** @param {vscode.ExtensionContext} context */
 function activate(context) {
+	// Lokales Logging (Output-Panel „VSCodium Agent“); es verlassen keine Daten die Maschine.
+	const output = vscode.window.createOutputChannel('VSCodium Agent', { log: true });
+	context.subscriptions.push(output);
+	const logger = createLogger(output);
+	logger.info(`Extension aktiviert (v${context.extension.packageJSON.version})`);
+
 	const activity = ActivityIndex.fromJSON(context.workspaceState.get(ACTIVITY_STATE_KEY));
 	wireActivityTracking(context, activity);
 
-	const provider = new ChatViewProvider(context, activity);
+	const provider = new ChatViewProvider(context, activity, logger);
 
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider, {
@@ -66,6 +75,7 @@ function activate(context) {
 						const text = await client.ping();
 						void vscode.window.showInformationMessage(`Verbindung OK (Projekt "${client.projectId}", Modell "${client.model}"): ${text.slice(0, 80)}`);
 					} catch (err) {
+						logger.error('Verbindungstest fehlgeschlagen', err);
 						const hint = err && err.hint ? ` – ${err.hint}` : '';
 						void vscode.window.showErrorMessage(`Verbindung fehlgeschlagen: ${err.message}${hint}`);
 					}
@@ -77,7 +87,67 @@ function activate(context) {
 
 		vscode.commands.registerCommand('vscodiumAgent.openSettings', () => {
 			void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:vscodium.vscodium-agent');
-		})
+		}),
+
+		vscode.commands.registerCommand('vscodiumAgent.showLog', () => output.show(true))
+	);
+
+	// ── Inline-Edit (Strg+I), Quick-Fixes, Terminal-Debug ───────────────────
+	const inlineEdit = new InlineEditController(provider, logger);
+	context.subscriptions.push(
+		inlineEdit,
+
+		vscode.commands.registerCommand('vscodiumAgent.inlineEdit', () => inlineEdit.run()),
+
+		vscode.commands.registerCommand('vscodiumAgent.fixWithAi', (uri, diagnostic) => {
+			if (!uri || !diagnostic) { return; }
+			void inlineEdit.fixDiagnostic(uri, diagnostic);
+		}),
+
+		vscode.commands.registerCommand('vscodiumAgent.explainProblem', async (uri, diagnostic) => {
+			if (!uri || !diagnostic) { return; }
+			const rel = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
+			const source = diagnostic.source ? ` (Quelle: ${diagnostic.source})` : '';
+			await vscode.commands.executeCommand('vscodiumAgent.chatView.focus');
+			void provider.runTask(
+				`Erkläre das folgende Problem in ${rel}, Zeile ${diagnostic.range.start.line + 1}, und schlage eine Behebung vor. Nur erklären, noch nichts ändern: "${diagnostic.message}"${source}`
+			);
+		}),
+
+		vscode.commands.registerCommand('vscodiumAgent.debugTerminal', async () => {
+			const previousClipboard = await vscode.env.clipboard.readText();
+			let outputText = '';
+			try {
+				await vscode.commands.executeCommand('workbench.action.terminal.copyLastCommandOutput');
+				outputText = await vscode.env.clipboard.readText();
+			} catch (_e) { /* Shell-Integration evtl. nicht aktiv */ }
+			if (!outputText || outputText === previousClipboard) {
+				try {
+					await vscode.commands.executeCommand('workbench.action.terminal.selectAll');
+					await vscode.commands.executeCommand('workbench.action.terminal.copySelection');
+					await vscode.commands.executeCommand('workbench.action.terminal.clearSelection');
+					outputText = await vscode.env.clipboard.readText();
+				} catch (_e) { /* kein Terminal offen */ }
+			}
+			await vscode.env.clipboard.writeText(previousClipboard); // Zwischenablage wiederherstellen
+
+			if (!outputText || outputText === previousClipboard) {
+				void vscode.window.showWarningMessage('Keine Terminal-Ausgabe gefunden. Ist ein Terminal geöffnet und die Shell-Integration aktiv?');
+				return;
+			}
+			const tail = outputText.split('\n').slice(-150).join('\n').trim().slice(-12000);
+			logger.info(`Terminal-Debug gestartet (${tail.length} Zeichen Ausgabe)`);
+			await vscode.commands.executeCommand('vscodiumAgent.chatView.focus');
+			void provider.runTask(
+				`Debugge diesen Terminal-Fehler. Analysiere die Ausgabe, finde die Ursache im Projekt und schlage eine Behebung vor:\n\`\`\`\n${tail}\n\`\`\``
+			);
+		}),
+
+		vscode.languages.registerCodeActionsProvider(
+			{ scheme: 'file' },
+			new AgentCodeActionProvider(),
+			{ providedCodeActionKinds: AgentCodeActionProvider.providedCodeActionKinds }
+		)
 	);
 
 	// Agent-Chat beim IDE-Start automatisch öffnen (wie in agentischen IDEs üblich).

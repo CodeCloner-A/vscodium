@@ -2,11 +2,11 @@
   "name": "vscodium-agent",
   "displayName": "VSCodium Agent",
   "description": "Integrierter KI-Agent (Firebase AI Logic / Gemini): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "AI",
@@ -77,6 +77,39 @@
         "title": "Agent-Einstellungen öffnen",
         "category": "Agent",
         "icon": "$(gear)"
+      },
+      {
+        "command": "vscodiumAgent.showLog",
+        "title": "Log anzeigen",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.inlineEdit",
+        "title": "Inline-Edit (KI)",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.debugTerminal",
+        "title": "Terminal-Ausgabe mit KI debuggen",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.fixWithAi",
+        "title": "Mit KI beheben",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.explainProblem",
+        "title": "Mit KI erklären",
+        "category": "Agent"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "vscodiumAgent.inlineEdit",
+        "key": "ctrl+i",
+        "mac": "cmd+i",
+        "when": "editorTextFocus && !editorReadonly"
       }
     ],
     "menus": {
@@ -90,6 +123,22 @@
           "command": "vscodiumAgent.openSettings",
           "when": "view == vscodiumAgent.chatView",
           "group": "navigation@2"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "vscodiumAgent.debugTerminal",
+          "group": "1_agent"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vscodiumAgent.fixWithAi",
+          "when": "false"
+        },
+        {
+          "command": "vscodiumAgent.explainProblem",
+          "when": "false"
         }
       ]
     },
@@ -122,12 +171,17 @@
         "vscodiumAgent.firebase.location": {
           "type": "string",
           "default": "us-central1",
-          "description": "Vertex-AI-Region (nur bei Backend \"vertexAI\")."
+          "markdownDescription": "Experten-Override: Vertex-AI-Region (nur bei Backend `vertexAI`). Modelle mit festem Standort (Gemini 3.x → `global`) übersteuern diese Einstellung automatisch."
         },
         "vscodiumAgent.model": {
           "type": "string",
           "default": "gemini-2.5-flash",
-          "markdownDescription": "Gemini-Modellname, z. B. `gemini-2.5-flash` oder `gemini-2.5-pro`."
+          "markdownDescription": "Gemini-Modellname, z. B. `gemini-3.5-flash` oder `gemini-2.5-pro`. Bequemer über den Modell-Picker in der Chat-Statusleiste; der Standort wird pro Modell automatisch aufgelöst."
+        },
+        "vscodiumAgent.inlineEdit.model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "markdownDescription": "Modell für Inline-Edit (Strg+I), Quick-Fixes und „In Datei übernehmen“. Latenz zählt hier mehr als Tiefe – `gemini-2.5-flash` empfohlen."
         },
         "vscodiumAgent.openOnStartup": {
           "type": "boolean",
@@ -168,6 +222,19 @@
           "maximum": 1800,
           "description": "Timeout in Sekunden für vom Agenten ausgeführte Kommandos (z. B. Testläufe)."
         },
+        "vscodiumAgent.terminal.mode": {
+          "type": "string",
+          "enum": [
+            "captured",
+            "terminal"
+          ],
+          "default": "captured",
+          "enumDescriptions": [
+            "Kommandos laufen unsichtbar im Hintergrund; der Agent erhält die Ausgabe (Standard).",
+            "Kommandos laufen sichtbar im „Agent“-Terminal (braucht Shell-Integration; sonst automatischer Rückfall auf den Hintergrund-Modus). Ohne stdout/stderr-Trennung."
+          ],
+          "markdownDescription": "Wo vom Agenten freigegebene Kommandos (`run_command`) ausgeführt werden."
+        },
         "vscodiumAgent.context.maxTreeEntries": {
           "type": "number",
           "default": 250,
@@ -180,3 +247,4 @@
     "test": "node test/run.js"
   }
 }
+

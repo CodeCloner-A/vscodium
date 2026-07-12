@@ -7,10 +7,13 @@
 
 const vscode = require('vscode');
 const crypto = require('crypto');
-const { FirebaseAiLogicClient } = require('../lib/firebaseClient');
+const { FirebaseAiLogicClient, extractText, extractBlockReason, normalizeModelName } = require('../lib/firebaseClient');
 const { AgentRun } = require('../lib/agentController');
 const { WorkspaceHost } = require('../lib/workspaceHost');
 const { buildSystemPrompt } = require('../lib/prompts');
+const { NOOP_LOGGER } = require('../lib/logger');
+const { buildApplyRequest, extractCode, APPLY_MAX_LINES } = require('../lib/inlineEdit');
+const { pickerModels, resolveRoute, fixedLocation } = require('../lib/modelCatalog');
 
 const SECRET_KEY = 'vscodiumAgent.firebaseApiKey';
 const STATE_KEY = 'vscodiumAgent.sessions.v1';
@@ -22,13 +25,16 @@ class ChatViewProvider {
 	/**
 	 * @param {vscode.ExtensionContext} context
 	 * @param {import('../lib/activityIndex').ActivityIndex} [activity]
+	 * @param {ReturnType<import('../lib/logger').createLogger>} [logger]
 	 */
-	constructor(context, activity) {
+	constructor(context, activity, logger) {
 		this.context = context;
 		this.activity = activity || null;
+		this.log = logger || NOOP_LOGGER;
 		/** @type {vscode.WebviewView|undefined} */
 		this.view = undefined;
 		this.running = false;
+		this._applying = false;
 		/** @type {AbortController|null} */
 		this.abort = null;
 		/** @type {Map<string, (accept: boolean) => void>} */
@@ -38,6 +44,13 @@ class ChatViewProvider {
 		this._saveTimer = null;
 
 		this._loadSessions();
+
+		// Einstellungs-Änderungen (Modell, Modus …) in die Statusleiste des Webviews spiegeln.
+		context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+			if (e.affectsConfiguration('vscodiumAgent')) {
+				void this._sendInit();
+			}
+		}));
 	}
 
 	// ── Sitzungen (Persistenz: workspaceState, pro Projekt) ──────────────────
@@ -157,7 +170,9 @@ class ChatViewProvider {
 			backend: cfg.get('firebase.backend', 'googleAI'),
 			location: cfg.get('firebase.location', 'us-central1'),
 			model: cfg.get('model', 'gemini-2.5-flash'),
+			inlineEditModel: cfg.get('inlineEdit.model', 'gemini-2.5-flash'),
 			approvalMode: cfg.get('approvalMode', 'review'),
+			terminalMode: cfg.get('terminal.mode', 'captured'),
 			maxIterations: cfg.get('maxIterations', 24),
 			commandTimeoutSec: cfg.get('commandTimeoutSec', 180),
 			maxTreeEntries: cfg.get('context.maxTreeEntries', 250)
@@ -168,16 +183,23 @@ class ChatViewProvider {
 		return this.context.secrets.get(SECRET_KEY);
 	}
 
-	async buildClient() {
+	/** @param {string} [modelOverride]  z. B. das Inline-Edit-Modell. */
+	async buildClient(modelOverride) {
 		const cfg = this.config();
 		const apiKey = await this.getApiKey();
+		const model = modelOverride || cfg.model;
+		// Auto-Routing: Modelle mit festem Standort übersteuern die Location-Einstellung.
+		const route = resolveRoute(model, cfg);
+		if (route.pinned) {
+			this.log.info(`Standort automatisch gesetzt: ${route.location} (Modell ${model} erlaubt "${cfg.location}" nicht)`);
+		}
 		return new FirebaseAiLogicClient({
 			apiKey,
 			projectId: cfg.projectId,
 			appId: cfg.appId,
-			backend: cfg.backend,
-			location: cfg.location,
-			model: cfg.model
+			backend: route.backend,
+			location: route.location,
+			model
 		});
 	}
 
@@ -185,8 +207,10 @@ class ChatViewProvider {
 		const cfg = this.config();
 		const options = {
 			approvalMode: cfg.approvalMode,
+			terminalMode: cfg.terminalMode,
 			commandTimeoutSec: cfg.commandTimeoutSec,
-			maxTreeEntries: cfg.maxTreeEntries
+			maxTreeEntries: cfg.maxTreeEntries,
+			logger: this.log
 		};
 		if (!this.host) {
 			this.host = new WorkspaceHost(this._approvals(), options);
@@ -235,8 +259,7 @@ class ChatViewProvider {
 				if (this.abort) { this.abort.abort(); }
 				this._rejectAllPending();
 				break;
-			case 'editDecision':
-			case 'commandDecision': {
+			case 'editDecision': {
 				const resolve = this.pendingDecisions.get(msg.id);
 				if (resolve) {
 					this.pendingDecisions.delete(msg.id);
@@ -244,8 +267,37 @@ class ChatViewProvider {
 				}
 				break;
 			}
+			case 'commandDecision': {
+				const resolve = this.pendingDecisions.get(msg.id);
+				if (resolve) {
+					this.pendingDecisions.delete(msg.id);
+					resolve({
+						accept: Boolean(msg.accept),
+						command: typeof msg.command === 'string' ? msg.command : undefined
+					});
+				}
+				break;
+			}
+			case 'setModel': {
+				const model = String(msg.model || '').trim();
+				if (model) {
+					const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
+					// Ein Workspace-Wert überschattet Global – dorthin schreiben, wo der Wert wirkt,
+					// sonst springt der Picker still auf das alte Modell zurück.
+					const info = cfg.inspect('model');
+					const target = info && info.workspaceValue !== undefined
+						? vscode.ConfigurationTarget.Workspace
+						: vscode.ConfigurationTarget.Global;
+					await cfg.update('model', model, target);
+					this.log.info(`Modell umgestellt: ${model}`);
+				}
+				break;
+			}
 			case 'showDiff':
 				if (this.host) { await this.host.openDiff(msg.changeId); }
+				break;
+			case 'applyCode':
+				void this.applyCodeBlock(String(msg.code || ''));
 				break;
 			case 'newSession':
 				this.newSession();
@@ -268,12 +320,22 @@ class ChatViewProvider {
 	async _sendInit() {
 		const cfg = this.config();
 		const apiKey = await this.getApiKey();
+		// Normalisiert, damit Schreibweisen wie "models/x" den Katalog-Eintrag treffen;
+		// unbekannte Modelle aus den Einstellungen erhalten hier ihren Eintrag samt
+		// festem Standort (z. B. 3.x-Previews → global), statt im Webview ohne
+		// Regions-Anzeige synthetisiert zu werden.
+		const model = normalizeModelName(cfg.model);
+		const models = pickerModels();
+		if (model && !models.some(m => m.id === model)) {
+			models.push({ id: model, label: `${model} (aus den Einstellungen)`, region: fixedLocation(model) });
+		}
 		this._post({
 			type: 'init',
 			state: {
 				configured: Boolean(apiKey),
 				projectId: cfg.projectId,
-				model: cfg.model,
+				model,
+				models,
 				approvalMode: cfg.approvalMode,
 				running: this.running,
 				items: this.items,
@@ -287,8 +349,10 @@ class ChatViewProvider {
 
 	async runTask(text) {
 		if (!text) { return; }
-		if (this.running) {
-			this._post({ type: 'append', item: this._pushItem({ kind: 'info', text: 'Es läuft bereits eine Aufgabe. Erst stoppen oder warten.' }) });
+		// Auch eine laufende Codeblock-Übernahme blockiert: Ein paralleler Lauf würde deren
+		// offene Review-Karte in seinem finally per _rejectAllPending() stillschweigend ablehnen.
+		if (this.running || this._applying) {
+			this._post({ type: 'append', item: this._pushItem({ kind: 'info', text: 'Es läuft bereits ein Vorgang. Erst stoppen oder warten.' }) });
 			return;
 		}
 		const apiKey = await this.getApiKey();
@@ -310,6 +374,7 @@ class ChatViewProvider {
 
 		try {
 			const cfg = this.config();
+			this.log.info(`Agent-Lauf gestartet (Modell: ${cfg.model}, Modus: ${cfg.approvalMode}, Backend: ${cfg.backend})`);
 			const client = await this.buildClient();
 			const host = this.getHost();
 
@@ -322,7 +387,8 @@ class ChatViewProvider {
 				fileTree,
 				approvalMode: cfg.approvalMode,
 				shell: process.platform === 'win32' ? 'cmd/PowerShell' : 'sh',
-				activity: activityText
+				activity: activityText,
+				today: new Date().toLocaleDateString('de-DE', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
 			});
 			// Erfassungszeitpunkt merken: Deltas beziehen sich künftig hierauf.
 			void this.context.workspaceState.update(CAPTURE_KEY, Date.now());
@@ -345,12 +411,16 @@ class ChatViewProvider {
 						self._scheduleSave();
 					},
 					info: (t) => self._pushAndSend({ kind: 'info', text: t }),
-					error: (t) => self._pushAndSend({ kind: 'error', text: t })
+					error: (t) => {
+						self.log.error(`Agent meldet: ${t}`);
+						self._pushAndSend({ kind: 'error', text: t });
+					}
 				}
 			});
 
 			const result = await run.run(text);
 			this.history = run.contents;
+			this.log.info(`Agent-Lauf beendet (Status: ${result.status}, geänderte Dateien: ${run.filesChanged.size})`);
 
 			if (result.status === 'completed' && result.summary) {
 				this._pushAndSend({ kind: 'done', text: result.summary, success: result.success !== false });
@@ -361,6 +431,7 @@ class ChatViewProvider {
 				this._pushAndSend({ kind: 'info', text: `Geänderte Dateien: ${[...run.filesChanged].join(', ')}` });
 			}
 		} catch (err) {
+			this.log.error('Agent-Lauf fehlgeschlagen', err);
 			const hint = err && err.hint ? `\n${err.hint}` : '';
 			this._pushAndSend({ kind: 'error', text: `${err.message || err}${hint}` });
 		} finally {
@@ -369,6 +440,73 @@ class ChatViewProvider {
 			this._rejectAllPending();
 			this._post({ type: 'running', value: false });
 			this._scheduleSave();
+		}
+	}
+
+	// ── „In Datei übernehmen“ (Codeblock aus dem Chat) ───────────────────────
+
+	/**
+	 * Integriert einen Chat-Codeblock per Modell in die aktive Datei;
+	 * die Änderung läuft über den normalen Review-Flow (Karte + Diff + Undo-sicher).
+	 */
+	async applyCodeBlock(code) {
+		if (!code.trim()) { return; }
+		if (this.running || this._applying) {
+			this._pushAndSend({ kind: 'info', text: 'Bitte warten, bis der laufende Vorgang abgeschlossen ist.' });
+			return;
+		}
+		const apiKey = await this.getApiKey();
+		if (!apiKey) {
+			this._pushAndSend({ kind: 'error', text: 'Kein Firebase API-Key gesetzt.' });
+			return;
+		}
+		const editor = vscode.window.activeTextEditor
+			|| vscode.window.visibleTextEditors.find(e => e.document.uri.scheme === 'file');
+		if (!editor || editor.document.uri.scheme !== 'file') {
+			this._pushAndSend({ kind: 'error', text: 'Keine aktive Datei, auf die der Codeblock angewendet werden kann. Bitte Ziel-Datei im Editor öffnen.' });
+			return;
+		}
+		const doc = editor.document;
+		if (doc.lineCount > APPLY_MAX_LINES) {
+			this._pushAndSend({ kind: 'error', text: `Datei zu groß für automatisches Übernehmen (${doc.lineCount} Zeilen, Limit ${APPLY_MAX_LINES}). Bitte Zielstelle markieren und Inline-Edit (Strg+I) nutzen.` });
+			return;
+		}
+
+		this._applying = true;
+		const rel = vscode.workspace.asRelativePath(doc.uri, false).replace(/\\/g, '/');
+		this._pushAndSend({ kind: 'info', text: `Integriere Codeblock in ${rel} …` });
+		try {
+			const cfg = this.config();
+			const client = await this.buildClient(cfg.inlineEditModel);
+			const fileContent = doc.getText();
+			const response = await client.generateContent(buildApplyRequest({
+				code,
+				fileContent,
+				relPath: rel,
+				languageId: doc.languageId
+			}));
+			const blocked = extractBlockReason(response);
+			if (blocked) { throw new Error(blocked); }
+			let newContent = extractCode(extractText(response));
+			if (!newContent) { throw new Error('Leere Modellantwort.'); }
+			if (fileContent.endsWith('\n') && !newContent.endsWith('\n')) { newContent += '\n'; }
+			if (newContent === fileContent) {
+				this._pushAndSend({ kind: 'info', text: 'Das Modell hat keine sinnvolle Integrationsstelle gefunden – Datei unverändert.' });
+				return;
+			}
+			// Review-Flow: Karte im Chat, Diff-Vorschau, Undo-sichere Anwendung.
+			await this.getHost().applyChange({
+				kind: 'write',
+				path: rel,
+				newContent,
+				summary: 'Codeblock aus dem Chat in die Datei integriert'
+			});
+		} catch (err) {
+			this.log.error('Codeblock-Übernahme fehlgeschlagen', err);
+			const hint = err && err.hint ? `\n${err.hint}` : '';
+			this._pushAndSend({ kind: 'error', text: `Übernehmen fehlgeschlagen: ${err.message || err}${hint}` });
+		} finally {
+			this._applying = false;
 		}
 	}
 
@@ -407,12 +545,19 @@ class ChatViewProvider {
 					purpose: info.purpose,
 					status: auto ? 'accepted' : 'pending'
 				});
-				if (auto) { return true; }
-				const accepted = await self._awaitDecision(id);
+				if (auto) { return { approved: true, command: info.command }; }
+				const decision = await self._awaitDecision(id);
+				const accepted = decision === true || Boolean(decision && decision.accept);
+				const edited = decision && typeof decision.command === 'string' && decision.command.trim()
+					? decision.command.trim()
+					: info.command;
+				if (accepted && edited !== info.command) {
+					item.command = edited; // Persistenz: die Karte zeigt das tatsächlich ausgeführte Kommando
+				}
 				item.status = accepted ? 'accepted' : 'rejected';
-				self._post({ type: 'decision', id, status: item.status });
+				self._post({ type: 'decision', id, status: item.status, command: item.command });
 				self._scheduleSave();
-				return accepted;
+				return { approved: accepted, command: edited };
 			}
 		};
 	}
@@ -481,7 +626,7 @@ class ChatViewProvider {
 	</div>
 	<div id="messages"></div>
 	<div id="composer">
-		<div id="statusline"><span id="status-model"></span><span id="status-mode"></span></div>
+		<div id="statusline"><span id="status-project"></span><select id="model-select" title="Gemini-Modell wählen"></select><span id="status-mode"></span></div>
 		<textarea id="input" rows="3" placeholder="Aufgabe beschreiben … (Enter = Senden, Shift+Enter = Zeile)"></textarea>
 		<div id="actions">
 			<button id="btn-send">Senden</button>

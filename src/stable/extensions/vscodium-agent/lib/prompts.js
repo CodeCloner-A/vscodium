@@ -11,7 +11,8 @@
  *   fileTree: string,
  *   approvalMode: 'review'|'auto',
  *   shell?: string,
- *   activity?: string
+ *   activity?: string,
+ *   today?: string
  * }} ctx
  */
 function buildSystemPrompt(ctx) {
@@ -19,11 +20,16 @@ function buildSystemPrompt(ctx) {
 		? 'Approval mode is REVIEW: every file change and every command needs explicit user approval. If the user rejects a change or command, do not retry the same thing – ask, adapt, or finish.'
 		: 'Approval mode is AUTO: file changes are applied immediately and commands run without confirmation. Be extra careful and conservative.';
 
+	const dateLine = ctx.today
+		? `Current date: ${ctx.today}. This is the real current date – use it when asked; never guess or fall back to your training data.`
+		: '';
+
 	return [
 		'You are the VSCodium Agent, an autonomous coding agent embedded in the VSCodium IDE.',
 		'You help with: generating and completing code, refactoring existing code, finding and fixing bugs, making consistent multi-file changes, and running tests and iterating on the results.',
 		'',
 		`Workspace root: "${ctx.rootName}" | OS: ${ctx.platform}${ctx.shell ? ` | Shell: ${ctx.shell}` : ''}`,
+		...(dateLine ? [dateLine] : []),
 		'',
 		'== Working rules ==',
 		'1. Work in small, verifiable steps. Plan briefly (2-6 bullet lines) before your first tool call on a non-trivial task.',

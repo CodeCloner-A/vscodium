@@ -9,7 +9,8 @@
 	const elSend = document.getElementById('btn-send');
 	const elStop = document.getElementById('btn-stop');
 	const elSetup = document.getElementById('setup');
-	const elStatusModel = document.getElementById('status-model');
+	const elStatusProject = document.getElementById('status-project');
+	const elModelSelect = document.getElementById('model-select');
 	const elStatusMode = document.getElementById('status-mode');
 	const elSessionSelect = document.getElementById('session-select');
 	const elNewSession = document.getElementById('btn-new-session');
@@ -35,6 +36,29 @@
 		vscode.postMessage({ type: 'switchSession', id: elSessionSelect.value });
 	});
 	elNewSession.addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
+
+	// ── Modell-Picker (nur Gemini; Liste kommt vom Extension-Host) ───────────
+
+	function renderModels(models, current) {
+		elModelSelect.innerHTML = '';
+		const entries = (models || []).slice();
+		if (current && !entries.some(m => m.id === current)) {
+			entries.push({ id: current, label: `${current} (aus den Einstellungen)` });
+		}
+		for (const m of entries) {
+			const opt = document.createElement('option');
+			opt.value = m.id;
+			// Fester Standort (z. B. Gemini 3.x → global) wird angezeigt statt konfiguriert.
+			opt.textContent = m.region ? `${m.label} (${m.region})` : m.label;
+			if (m.region) { opt.title = `Standort wird automatisch gesetzt: ${m.region}`; }
+			if (m.id === current) { opt.selected = true; }
+			elModelSelect.appendChild(opt);
+		}
+	}
+
+	elModelSelect.addEventListener('change', () => {
+		vscode.postMessage({ type: 'setModel', model: elModelSelect.value });
+	});
 	elDelSession.addEventListener('click', () => {
 		if (elSessionSelect.value) {
 			vscode.postMessage({ type: 'deleteSession', id: elSessionSelect.value });
@@ -68,15 +92,42 @@
 			.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 	}
 
-	/** Sehr kleines, sicheres Markdown: Codeblöcke, Inline-Code, fett. */
+	/** Sehr kleines, sicheres Markdown: Codeblöcke (mit Aktionen), Inline-Code, fett. */
 	function md(s) {
 		const escaped = esc(s);
-		const withBlocks = escaped.replace(/```([\s\S]*?)```/g, (_m, code) => `<pre>${code.replace(/^\w+\n/, '')}</pre>`);
+		// Zeilenumbrüche im <pre> als &#10; kodieren: der abschließende \n→<br>-Ersatz darf sie
+		// nicht treffen, sonst verlieren Kopieren/Übernehmen (pre.textContent) alle Umbrüche.
+		const withBlocks = escaped.replace(/```([\s\S]*?)```/g, (_m, code) =>
+			`<div class="codeblock"><pre>${code.replace(/^\w+\n/, '').replace(/\n/g, '&#10;')}</pre>` +
+			`<div class="code-actions">` +
+			`<button class="secondary" data-act="apply-code" title="Codeblock per KI in die aktive Datei integrieren (Review-Karte folgt)">In Datei übernehmen</button>` +
+			`<button class="secondary" data-act="copy-code">Kopieren</button>` +
+			`</div></div>`);
 		return withBlocks
 			.replace(/`([^`\n]+)`/g, '<code>$1</code>')
 			.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
 			.replace(/\n/g, '<br>');
 	}
+
+	// Codeblock-Aktionen (delegiert, da Items dynamisch gerendert werden).
+	elMessages.addEventListener('click', (e) => {
+		const btn = e.target && e.target.closest ? e.target.closest('button[data-act="apply-code"], button[data-act="copy-code"]') : null;
+		if (!btn) { return; }
+		const block = btn.closest('.codeblock');
+		const pre = block ? block.querySelector('pre') : null;
+		if (!pre) { return; }
+		const code = pre.textContent;
+		if (btn.dataset.act === 'copy-code') {
+			navigator.clipboard.writeText(code).then(() => {
+				const old = btn.textContent;
+				btn.textContent = 'Kopiert ✓';
+				setTimeout(() => { btn.textContent = old; }, 1500);
+			});
+		} else {
+			if (running) { return; }
+			vscode.postMessage({ type: 'applyCode', code });
+		}
+	});
 
 	const statusLabel = {
 		pending: 'wartet auf Freigabe',
@@ -119,9 +170,13 @@
 				wireEditCard(div, item);
 				break;
 			}
-			case 'command':
+			case 'command': {
+				// Solange die Freigabe aussteht, ist das Kommando editierbar (wird so ausgeführt).
+				const cmdField = item.status === 'pending'
+					? `<input class="cmd-edit" value="${esc(item.command)}" spellcheck="false" title="Kommando vor der Ausführung anpassen">`
+					: `<code>${esc(item.command)}</code>`;
 				div.innerHTML =
-					`<div class="card-head"><span class="tag cmd">Kommando</span> <code>${esc(item.command)}</code></div>` +
+					`<div class="card-head"><span class="tag cmd">Kommando</span> ${cmdField}</div>` +
 					`<div class="card-sub">${esc(item.purpose || '')} <span class="lines">(in ${esc(item.cwd || '.')})</span></div>` +
 					`<div class="card-actions">` +
 					`<button data-act="accept">Ausführen</button>` +
@@ -130,6 +185,7 @@
 					`</div>`;
 				wireCommandCard(div, item);
 				break;
+			}
 			case 'done':
 				div.innerHTML = `<div class="done-head">${item.success === false ? '◐ Abgeschlossen (mit offenen Punkten)' : '✔ Abgeschlossen'}</div><div class="bubble assistant-bubble">${md(item.text)}</div>`;
 				break;
@@ -159,8 +215,12 @@
 	}
 
 	function wireCommandCard(div, item) {
+		const editedCommand = () => {
+			const input = div.querySelector('.cmd-edit');
+			return input ? input.value : item.command;
+		};
 		div.querySelector('[data-act="accept"]').addEventListener('click', () => {
-			vscode.postMessage({ type: 'commandDecision', id: item.id, accept: true });
+			vscode.postMessage({ type: 'commandDecision', id: item.id, accept: true, command: editedCommand() });
 		});
 		div.querySelector('[data-act="reject"]').addEventListener('click', () => {
 			vscode.postMessage({ type: 'commandDecision', id: item.id, accept: false });
@@ -173,6 +233,13 @@
 		if (status === 'pending') {
 			if (decision) { decision.textContent = ''; }
 			return;
+		}
+		// Entschieden: editierbares Kommando-Feld einfrieren.
+		const input = div.querySelector('.cmd-edit');
+		if (input) {
+			const code = document.createElement('code');
+			code.textContent = input.value;
+			input.replaceWith(code);
 		}
 		for (const btn of div.querySelectorAll('.card-actions button')) {
 			if (btn.dataset.act !== 'diff') { btn.classList.add('hidden'); }
@@ -189,6 +256,7 @@
 		elStop.classList.toggle('hidden', !value);
 		elInput.disabled = false;
 		elSessionSelect.disabled = value;
+		elModelSelect.disabled = value;
 		elNewSession.disabled = value;
 		elDelSession.disabled = value;
 		document.body.classList.toggle('running', value);
@@ -200,12 +268,23 @@
 		const msg = event.data;
 		switch (msg.type) {
 			case 'init': {
+				// Entwürfe in editierbaren Kommando-Feldern überleben das Neu-Rendern
+				// (jede Settings-Änderung löst init aus, auch mitten in einer Freigabe).
+				const drafts = new Map();
+				for (const input of elMessages.querySelectorAll('.item[data-id] .cmd-edit')) {
+					drafts.set(input.closest('.item').dataset.id, input.value);
+				}
 				elMessages.innerHTML = '';
 				elSetup.classList.toggle('hidden', msg.state.configured);
-				elStatusModel.textContent = `${msg.state.projectId} · ${msg.state.model}`;
+				elStatusProject.textContent = msg.state.projectId;
+				renderModels(msg.state.models, msg.state.model);
 				elStatusMode.textContent = msg.state.approvalMode === 'review' ? 'Review-Modus' : 'Auto-Modus';
 				renderSessions(msg.state.sessions || [], msg.state.activeSessionId);
 				for (const item of msg.state.items) { render(item); }
+				for (const [id, value] of drafts) {
+					const input = elMessages.querySelector(`.item[data-id="${id}"] .cmd-edit`);
+					if (input) { input.value = value; }
+				}
 				setRunning(msg.state.running);
 				break;
 			}
@@ -225,7 +304,11 @@
 			}
 			case 'decision': {
 				const div = elMessages.querySelector(`.item[data-id="${msg.id}"]`);
-				if (div) { applyDecisionState(div, msg.status); }
+				if (div) {
+					const input = div.querySelector('.cmd-edit');
+					if (input && msg.command) { input.value = msg.command; }
+					applyDecisionState(div, msg.status);
+				}
 				break;
 			}
 			case 'running':

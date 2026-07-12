@@ -109,6 +109,55 @@ class FirebaseAiLogicClient {
 		throw lastError;
 	}
 
+	/**
+	 * Streamender generateContent-Aufruf (SSE). Ruft onText mit jedem neuen Textfragment
+	 * auf und liefert am Ende die zusammengeführte GenerateContentResponse.
+	 * Bewusst ohne Retry: Streaming läuft interaktiv; den Fallback entscheidet der Aufrufer.
+	 * @param {object} request GenerateContentRequest
+	 * @param {AbortSignal} [signal]
+	 * @param {(text: string) => void} [onText]
+	 * @returns {Promise<object>} zusammengeführte GenerateContentResponse
+	 */
+	async generateContentStream(request, signal, onText) {
+		let response;
+		try {
+			response = await this._fetch(`${this.url('streamGenerateContent')}?alt=sse`, {
+				method: 'POST',
+				headers: this.headers(),
+				body: JSON.stringify(request),
+				signal
+			});
+		} catch (err) {
+			if (err && err.name === 'AbortError') {
+				throw err;
+			}
+			throw new FirebaseAiError(`Netzwerkfehler beim Streaming-Aufruf: ${err.message}`, { retryable: true });
+		}
+		if (!response.ok) {
+			throw await this._errorFromResponse(response);
+		}
+
+		const chunks = [];
+		const parser = createSseParser((data) => {
+			let json;
+			try { json = JSON.parse(data); } catch (_e) { return; }
+			chunks.push(json);
+			const text = extractText(json);
+			if (text && onText) { onText(text); }
+		});
+		const decoder = new TextDecoder('utf-8');
+		for await (const piece of response.body) {
+			parser.push(decoder.decode(piece, { stream: true }));
+		}
+		parser.push(decoder.decode());
+		parser.end();
+
+		if (chunks.length === 0) {
+			throw new FirebaseAiError('Leere Streaming-Antwort vom Modell.');
+		}
+		return mergeStreamResponses(chunks);
+	}
+
 	/** Minimaler Verbindungstest. */
 	async ping(signal) {
 		const res = await this.generateContent({
@@ -137,7 +186,11 @@ class FirebaseAiLogicClient {
 		if (response.ok) {
 			return response.json();
 		}
+		throw await this._errorFromResponse(response);
+	}
 
+	/** HTTP-Fehlerantwort in eine FirebaseAiError mit Hinweis übersetzen. */
+	async _errorFromResponse(response) {
 		let message = '';
 		let details;
 		try {
@@ -149,7 +202,7 @@ class FirebaseAiLogicClient {
 		} catch (_e) { /* ignorieren */ }
 
 		if (response.status === 403 && Array.isArray(details) && details.some(d => d && d.reason === 'SERVICE_DISABLED')) {
-			throw new FirebaseAiError(
+			return new FirebaseAiError(
 				'Die Firebase AI Logic API ist für dieses Projekt nicht aktiviert.',
 				{
 					status: 403,
@@ -158,30 +211,104 @@ class FirebaseAiLogicClient {
 			);
 		}
 		if (response.status === 401 || response.status === 403) {
-			throw new FirebaseAiError(`Authentifizierung fehlgeschlagen (${response.status}): ${message}`, {
+			return new FirebaseAiError(`Authentifizierung fehlgeschlagen (${response.status}): ${message}`, {
 				status: response.status,
 				hint: 'API-Key prüfen (Firebase Console → Projekteinstellungen → Allgemein → Web-App → apiKey). Ggf. API-Key-Einschränkungen: firebasevertexai.googleapis.com muss erlaubt sein.'
 			});
 		}
 		if (response.status === 404) {
-			throw new FirebaseAiError(`Modell oder Pfad nicht gefunden (404): ${message}`, {
+			return new FirebaseAiError(`Modell oder Pfad nicht gefunden (404): ${message}`, {
 				status: 404,
-				hint: `Modellname prüfen (Einstellung vscodiumAgent.model, aktuell "${this.model}") und Backend (googleAI/vertexAI).`
+				hint: `Modellname prüfen (Einstellung vscodiumAgent.model, aktuell "${this.model}") und Backend (googleAI/vertexAI). Gemini-3.x-Modelle sind über AI Logic nur mit Standort "global" erreichbar (setzt die Extension automatisch).`
 			});
 		}
 		const retryable = response.status === 429 || response.status >= 500;
-		throw new FirebaseAiError(`Firebase AI Logic Fehler [${response.status} ${response.statusText}] ${message}`, {
+		return new FirebaseAiError(`Firebase AI Logic Fehler [${response.status} ${response.statusText}] ${message}`, {
 			status: response.status,
 			retryable
 		});
 	}
 }
 
+/**
+ * Minimaler SSE-Parser: verkraftet beliebig zerteilte Chunks (auch mitten in einer Zeile)
+ * und ruft onData für jedes vollständige Event mit dem zusammengesetzten data-Inhalt auf.
+ * @param {(data: string) => void} onData
+ */
+function createSseParser(onData) {
+	let buffer = '';
+	const processEvent = (raw) => {
+		const dataLines = [];
+		for (const line of raw.split(/\r?\n/)) {
+			if (line.startsWith('data:')) {
+				dataLines.push(line.slice(5).replace(/^ /, ''));
+			}
+		}
+		if (dataLines.length > 0) {
+			onData(dataLines.join('\n'));
+		}
+	};
+	return {
+		push(text) {
+			buffer += text;
+			for (;;) {
+				const m = /\r?\n\r?\n/.exec(buffer);
+				if (!m) { break; }
+				const raw = buffer.slice(0, m.index);
+				buffer = buffer.slice(m.index + m[0].length);
+				processEvent(raw);
+			}
+		},
+		end() {
+			if (buffer.trim()) {
+				processEvent(buffer);
+			}
+			buffer = '';
+		}
+	};
+}
+
+/**
+ * Streaming-Chunks zu einer GenerateContentResponse zusammenführen:
+ * Textteile werden konkateniert, andere Parts (functionCall …) angehängt,
+ * finishReason kommt aus dem letzten Chunk, promptFeedback aus dem ersten.
+ * @param {object[]} chunks
+ */
+function mergeStreamResponses(chunks) {
+	let text = '';
+	const otherParts = [];
+	let finishReason;
+	let promptFeedback;
+	for (const chunk of chunks) {
+		if (!promptFeedback && chunk && chunk.promptFeedback) {
+			promptFeedback = chunk.promptFeedback;
+		}
+		const cand = chunk && Array.isArray(chunk.candidates) ? chunk.candidates[0] : undefined;
+		if (!cand) { continue; }
+		if (cand.finishReason) { finishReason = cand.finishReason; }
+		const parts = (cand.content && Array.isArray(cand.content.parts)) ? cand.content.parts : [];
+		for (const p of parts) {
+			if (typeof p.text === 'string') { text += p.text; }
+			else { otherParts.push(p); }
+		}
+	}
+	const merged = {
+		candidates: [{
+			content: { role: 'model', parts: text ? [{ text }, ...otherParts] : otherParts },
+			finishReason: finishReason || 'STOP'
+		}]
+	};
+	if (promptFeedback) { merged.promptFeedback = promptFeedback; }
+	return merged;
+}
+
 /** "models/x" | "publishers/google/models/x" | "x" → "x" */
 function normalizeModelName(name) {
 	const trimmed = String(name || '').trim();
-	const parts = trimmed.split('/');
-	return parts[parts.length - 1] || 'gemini-2.5-flash';
+	// Leere Segmente (z. B. trailing Slash) fallen weg, statt still auf das
+	// Default-Modell umzuleiten; nur wirklich leere Eingabe erhält den Default.
+	const parts = trimmed.split('/').filter(Boolean);
+	return parts.length > 0 ? parts[parts.length - 1] : 'gemini-2.5-flash';
 }
 
 /** Erste Text-Teile einer Antwort extrahieren. */
@@ -232,5 +359,7 @@ module.exports = {
 	extractParts,
 	extractFunctionCalls,
 	extractBlockReason,
-	normalizeModelName
+	normalizeModelName,
+	createSseParser,
+	mergeStreamResponses
 };

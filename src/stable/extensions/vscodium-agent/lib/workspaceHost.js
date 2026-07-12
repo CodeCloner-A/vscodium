@@ -8,6 +8,8 @@
 const vscode = require('vscode');
 const cp = require('child_process');
 const path = require('path');
+const { NOOP_LOGGER } = require('./logger');
+const { stripAnsi, normalizeCommandApproval, capText } = require('./terminalExec');
 
 const DIFF_SCHEME = 'vscodium-agent-diff';
 
@@ -28,11 +30,12 @@ class WorkspaceHost {
 	 *   requestEditApproval(change): Promise<boolean>,
 	 *   requestCommandApproval(cmd): Promise<boolean>
 	 * }} approvals  – im Auto-Modus können beide sofort true liefern.
-	 * @param {{ approvalMode: 'review'|'auto', commandTimeoutSec: number, maxTreeEntries: number }} options
+	 * @param {{ approvalMode: 'review'|'auto', commandTimeoutSec: number, maxTreeEntries: number, logger?: object }} options
 	 */
 	constructor(approvals, options) {
 		this.approvals = approvals;
 		this.options = options;
+		this.log = (options && options.logger) || NOOP_LOGGER;
 		/** @type {Map<string, {kind:string, path:string, oldContent:string, newContent:string, summary:string}>} */
 		this.changes = new Map();
 		this._changeCounter = 0;
@@ -189,6 +192,7 @@ class WorkspaceHost {
 		});
 
 		if (!approved) {
+			this.log.info(`Änderung abgelehnt: ${record.kind} ${record.path}`);
 			return { status: 'rejected', message: 'Vom Benutzer abgelehnt. Nicht identisch erneut versuchen.', changeId: id };
 		}
 
@@ -196,16 +200,68 @@ class WorkspaceHost {
 
 		if (record.kind === 'delete') {
 			await vscode.workspace.fs.delete(uri, { useTrash: true });
+			this.log.info(`Gelöscht (Papierkorb): ${record.path}`);
 			return { status: 'applied', changeId: id };
 		}
 
 		await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(uri.fsPath)));
 		const dirty = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString() && d.isDirty);
-		await vscode.workspace.fs.writeFile(uri, Buffer.from(record.newContent, 'utf8'));
+
+		// Undo-Sicherheit: bevorzugt über WorkspaceEdit schreiben, damit die Änderung
+		// im Undo-Stack des Editors landet (Strg+Z stellt den alten Stand wieder her).
+		// Fällt nur bei nicht als Text öffenbaren Dateien auf fs.writeFile zurück.
+		const viaEdit = record.kind === 'modify'
+			? await this._replaceViaWorkspaceEdit(uri, record.newContent)
+			: await this._createViaWorkspaceEdit(uri, record.newContent);
+		if (!viaEdit) {
+			await vscode.workspace.fs.writeFile(uri, Buffer.from(record.newContent, 'utf8'));
+			this.log.warn(`FS-Fallback (kein Editor-Undo möglich): ${record.path}`);
+		}
+
+		this.log.info(`Angewendet: ${record.kind} ${record.path}${viaEdit ? '' : ' [fs-fallback]'}`);
 		const message = dirty
-			? 'Übernommen. Achtung: Die Datei hatte ungespeicherte Änderungen im Editor – bitte dort prüfen.'
+			? 'Übernommen. Hinweis: Die Datei hatte ungespeicherte Änderungen im Editor – der vorherige Stand ist über Rückgängig (Strg+Z) erreichbar.'
 			: undefined;
 		return { status: 'applied', message, changeId: id };
+	}
+
+	/**
+	 * Bestehende Datei per WorkspaceEdit vollständig ersetzen und speichern.
+	 * @returns {Promise<boolean>} true, wenn angewendet (Undo-fähig); false → Fallback nötig.
+	 */
+	async _replaceViaWorkspaceEdit(uri, newContent) {
+		let doc;
+		try {
+			doc = await vscode.workspace.openTextDocument(uri);
+		} catch (_e) {
+			return false; // binär oder nicht als Text öffenbar
+		}
+		const edit = new vscode.WorkspaceEdit();
+		const fullRange = new vscode.Range(
+			new vscode.Position(0, 0),
+			doc.lineAt(Math.max(doc.lineCount - 1, 0)).range.end
+		);
+		edit.replace(uri, fullRange, newContent);
+		if (!(await vscode.workspace.applyEdit(edit))) {
+			return false;
+		}
+		// Auf Platte speichern, damit read_file/Kommandos den neuen Stand sehen.
+		// Undo bleibt erhalten: Strg+Z stellt den alten Inhalt wieder her (Datei wird dirty).
+		return doc.isDirty ? doc.save() : true;
+	}
+
+	/**
+	 * Neue Datei per WorkspaceEdit anlegen (inkl. Inhalt).
+	 * @returns {Promise<boolean>} true, wenn angelegt; false → Fallback nötig.
+	 */
+	async _createViaWorkspaceEdit(uri, newContent) {
+		try {
+			const edit = new vscode.WorkspaceEdit();
+			edit.createFile(uri, { overwrite: true, contents: Buffer.from(newContent, 'utf8') });
+			return await vscode.workspace.applyEdit(edit);
+		} catch (_e) {
+			return false;
+		}
 	}
 
 	/** Diff-Vorschau für eine (auch bereits entschiedene) Änderung öffnen. */
@@ -246,16 +302,29 @@ class WorkspaceHost {
 			workDir = this.resolve(cwd).fsPath;
 		}
 
-		const approved = await this.approvals.requestCommandApproval({ command, cwd: cwd || '.', purpose: purpose || '' });
+		const approval = await this.approvals.requestCommandApproval({ command, cwd: cwd || '.', purpose: purpose || '' });
+		const { approved, command: finalCommand } = normalizeCommandApproval(approval, command);
 		if (!approved) {
+			this.log.info(`Kommando abgelehnt: ${command}`);
 			return { status: 'skipped', message: 'Vom Benutzer abgelehnt.' };
 		}
+		if (finalCommand !== command) {
+			this.log.info(`Kommando vom Benutzer angepasst: ${command} → ${finalCommand}`);
+		}
+		this.log.info(`Kommando gestartet: ${finalCommand} (cwd: ${cwd || '.'})`);
 
 		const timeoutMs = (timeoutSec || this.options.commandTimeoutSec || 180) * 1000;
-		const started = Date.now();
 
+		// Sichtbares Agent-Terminal (Shell-Integration): Nutzer sieht live, was passiert.
+		if (this.options.terminalMode === 'terminal') {
+			const viaTerminal = await this._runInTerminal(finalCommand, workDir, timeoutMs);
+			if (viaTerminal) { return viaTerminal; }
+			this.log.warn('Keine Shell-Integration im Agent-Terminal – Fallback auf gecapturten Lauf.');
+		}
+
+		const started = Date.now();
 		return new Promise((resolvePromise) => {
-			const child = cp.spawn(command, {
+			const child = cp.spawn(finalCommand, {
 				shell: true,
 				cwd: workDir,
 				env: { ...process.env, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1' }
@@ -278,13 +347,11 @@ class WorkspaceHost {
 				if (finished) { return; }
 				finished = true;
 				clearTimeout(timer);
-				resolvePromise({
-					status: 'ran',
-					exitCode: typeof exitCode === 'number' ? exitCode : -1,
-					stdout,
-					stderr,
-					durationMs: Date.now() - started
-				});
+				const code = typeof exitCode === 'number' ? exitCode : -1;
+				const durationMs = Date.now() - started;
+				const logFn = code === 0 ? 'info' : 'warn';
+				this.log[logFn](`Kommando beendet (Exit ${code}, ${durationMs} ms): ${finalCommand}`);
+				resolvePromise({ status: 'ran', exitCode: code, stdout, stderr, durationMs });
 			};
 			child.on('error', (err) => {
 				stderr += `\n[Agent] Startfehler: ${err.message}`;
@@ -292,6 +359,73 @@ class WorkspaceHost {
 			});
 			child.on('close', done);
 		});
+	}
+
+	/**
+	 * Kommando sichtbar im „Agent“-Terminal ausführen (Shell-Integration-API, VS Code ≥1.93).
+	 * Liefert null, wenn kein Terminal mit Shell-Integration verfügbar ist (→ Fallback).
+	 * Hinweis: Im PTY gibt es keine stdout/stderr-Trennung; alles landet in stdout.
+	 * @returns {Promise<{status:'ran', exitCode:number, stdout:string, stderr:string, durationMs:number}|null>}
+	 */
+	async _runInTerminal(command, workDir, timeoutMs) {
+		if (typeof vscode.window.onDidEndTerminalShellExecution !== 'function') {
+			return null; // API nicht vorhanden (ältere Basis)
+		}
+		let terminal = this._agentTerminal;
+		const stale = !terminal || terminal.exitStatus !== undefined || this._agentTerminalCwd !== workDir;
+		if (stale) {
+			if (terminal && terminal.exitStatus === undefined) { terminal.dispose(); }
+			terminal = vscode.window.createTerminal({ name: 'Agent', cwd: workDir, isTransient: true });
+			this._agentTerminal = terminal;
+			this._agentTerminalCwd = workDir;
+		}
+		terminal.show(true);
+
+		const shellIntegration = await waitForShellIntegration(terminal, 5000);
+		if (!shellIntegration) { return null; }
+
+		const started = Date.now();
+		const execution = shellIntegration.executeCommand(command);
+
+		let output = '';
+		const readDone = (async () => {
+			try {
+				for await (const data of execution.read()) {
+					output = capText(output, stripAnsi(data));
+				}
+			} catch (_e) { /* Stream endet mit dem Kommando */ }
+		})();
+
+		const exitCode = await new Promise((resolve) => {
+			const timer = setTimeout(() => { sub.dispose(); resolve('timeout'); }, timeoutMs);
+			const sub = vscode.window.onDidEndTerminalShellExecution((e) => {
+				if (e.execution === execution) {
+					clearTimeout(timer);
+					sub.dispose();
+					resolve(typeof e.exitCode === 'number' ? e.exitCode : -1);
+				}
+			});
+		});
+
+		if (exitCode === 'timeout') {
+			terminal.dispose();
+			this._agentTerminal = undefined;
+			this.log.warn(`Terminal-Kommando nach ${timeoutMs / 1000}s abgebrochen: ${command}`);
+			return {
+				status: 'ran',
+				exitCode: -1,
+				stdout: output,
+				stderr: `[Agent] Timeout nach ${timeoutMs / 1000}s – Terminal beendet.`,
+				durationMs: Date.now() - started
+			};
+		}
+
+		// Restausgabe einsammeln (der read-Stream endet kurz nach dem Exit-Event).
+		await Promise.race([readDone, new Promise(r => setTimeout(r, 1500))]);
+		const durationMs = Date.now() - started;
+		const logFn = exitCode === 0 ? 'info' : 'warn';
+		this.log[logFn](`Terminal-Kommando beendet (Exit ${exitCode}, ${durationMs} ms): ${command}`);
+		return { status: 'ran', exitCode, stdout: output, stderr: '', durationMs };
 	}
 
 	// ── Aktivitäts-Index ──────────────────────────────────────────────────────
@@ -394,6 +528,28 @@ function globToRegExp(glob) {
 		}
 	}
 	return new RegExp(out + '$');
+}
+
+/**
+ * Auf die Shell-Integration eines Terminals warten (undefined nach Timeout –
+ * z. B. Shell ohne Integration oder sehr langsamer Start).
+ * @param {vscode.Terminal} terminal
+ * @param {number} timeoutMs
+ */
+function waitForShellIntegration(terminal, timeoutMs) {
+	if (terminal.shellIntegration) {
+		return Promise.resolve(terminal.shellIntegration);
+	}
+	return new Promise((resolve) => {
+		const timer = setTimeout(() => { sub.dispose(); resolve(undefined); }, timeoutMs);
+		const sub = vscode.window.onDidChangeTerminalShellIntegration((e) => {
+			if (e.terminal === terminal) {
+				clearTimeout(timer);
+				sub.dispose();
+				resolve(e.shellIntegration);
+			}
+		});
+	});
 }
 
 function killTree(pid) {

@@ -2,6 +2,10 @@ vscode*
 VS*/*
 VSCode*
 VSCodium*
+# Die Agent-Extension liegt in einem Verzeichnis, das die unverankerten Muster
+# oben (vscode*, VSCodium*) sonst mit erfassen – neue Dateien wären für Git unsichtbar.
+!src/stable/extensions/vscodium-agent/
+!src/stable/extensions/vscodium-agent/**
 .DS_Store
 *.env
 assets/

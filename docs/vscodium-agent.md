@@ -41,9 +41,11 @@ Kommandopalette: **„Agent: Verbindung zu Firebase AI Logic testen"**. Bei „A
 |---|---|---|
 | `vscodiumAgent.firebase.projectId` | `controlling-man` | Firebase-Projekt |
 | `vscodiumAgent.firebase.backend` | `googleAI` | `googleAI` (Gemini Developer API) oder `vertexAI` |
-| `vscodiumAgent.firebase.location` | `us-central1` | Region (nur Vertex) |
-| `vscodiumAgent.model` | `gemini-2.5-flash` | z. B. auch `gemini-2.5-pro` für schwierige Aufgaben |
+| `vscodiumAgent.firebase.location` | `us-central1` | Experten-Override: Region (nur Vertex). Modelle mit festem Standort (Gemini 3.x → `global`) übersteuern sie automatisch |
+| `vscodiumAgent.model` | `gemini-2.5-flash` | z. B. `gemini-3.5-flash` (neueste Generation) oder `gemini-2.5-pro` für schwierige Aufgaben; bequem per Dropdown in der Chat-Statusleiste — den Standort löst die Extension pro Modell automatisch auf |
+| `vscodiumAgent.inlineEdit.model` | `gemini-2.5-flash` | Modell für Inline-Edit (Strg+I), Quick-Fixes, „In Datei übernehmen“ |
 | `vscodiumAgent.approvalMode` | `review` | `review` = Diffs bestätigen, `auto` = direkt anwenden |
+| `vscodiumAgent.terminal.mode` | `captured` | `terminal` = Agent-Kommandos sichtbar im „Agent“-Terminal (Shell-Integration nötig) |
 | `vscodiumAgent.maxIterations` | `24` | Schrittlimit pro Aufgabe (Drift-Schutz) |
 | `vscodiumAgent.commandTimeoutSec` | `180` | Timeout für Test-/Buildläufe |
 
