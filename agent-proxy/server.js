@@ -7,7 +7,10 @@
  * Prompt- oder Code-Inhalte zu protokollieren.
  *
  * Endpunkte:
- *   GET  /healthz                                       (ohne Anmeldung)
+ *   GET  /health                                        (ohne Anmeldung; NICHT /healthz –
+ *                                                        den fängt Googles Frontend auf
+ *                                                        *.run.app ab, bevor er den
+ *                                                        Container erreicht)
  *   GET  /v1/models                                     Katalog für den Modell-Picker
  *   POST /v1/models/{model}:generateContent             Gemini-Request, JSON-Antwort
  *   POST /v1/models/{model}:streamGenerateContent       Gemini-Request, SSE-Antwort
@@ -143,7 +146,7 @@ function createServer(options) {
 		try {
 			const url = new URL(req.url, 'http://localhost');
 
-			if (req.method === 'GET' && url.pathname === '/healthz') {
+			if (req.method === 'GET' && url.pathname === '/health') {
 				return send(res, 200, { status: 'ok' });
 			}
 

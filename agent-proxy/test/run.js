@@ -188,7 +188,7 @@ async function testHttpServer() {
 
 	try {
 		// Health ohne Anmeldung, alles andere nur mit gültigem Token.
-		assert.strictEqual((await fetch(`${base}/healthz`)).status, 200);
+		assert.strictEqual((await fetch(`${base}/health`)).status, 200);
 		assert.strictEqual((await fetch(`${base}/v1/models`)).status, 401);
 		assert.strictEqual((await fetch(`${base}/v1/models`, { headers: { 'Authorization': 'Bearer kaputt' } })).status, 401);
 

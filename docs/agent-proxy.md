@@ -15,7 +15,7 @@ Code-Inhalte werden nie protokolliert.
 
 | Methode | Pfad | Zweck |
 |---|---|---|
-| GET | `/healthz` | Liveness (ohne Anmeldung) |
+| GET | `/health` | Liveness (ohne Anmeldung; `/healthz` fängt Googles Frontend auf `*.run.app` selbst ab) |
 | GET | `/v1/models` | Modell-Katalog für den Picker |
 | POST | `/v1/models/{model}:generateContent` | Gemini-Request, JSON-Antwort |
 | POST | `/v1/models/{model}:streamGenerateContent` | Gemini-Request, SSE-Stream |
@@ -98,15 +98,15 @@ Zugangskontrolle passiert **in der Anwendung**: Ohne gültiges, signiertes Fireb
 
 ```bash
 # Health (ohne Token):
-curl https://<SERVICE-URL>/healthz
+curl https://agent-proxy-476281311476.europe-west1.run.app/health
 # → {"status":"ok"}
 
 # Ohne Token muss 401 kommen:
-curl -i https://<SERVICE-URL>/v1/models
+curl -i https://agent-proxy-476281311476.europe-west1.run.app/v1/models
 # → HTTP/2 401 … {"error":"Nicht angemeldet.", …}
 
 # Mit gültigem ID-Token (z. B. aus einem Firebase-Auth-Testnutzer):
-curl -H "Authorization: Bearer <ID_TOKEN>" https://<SERVICE-URL>/v1/models
+curl -H "Authorization: Bearer <ID_TOKEN>" https://agent-proxy-476281311476.europe-west1.run.app/v1/models
 # → {"models":[{"id":"gemini-3.5-flash","location":"eu"}, …]}
 ```
 
