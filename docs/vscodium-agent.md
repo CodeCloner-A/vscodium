@@ -68,6 +68,10 @@ Modell-Katalog. Der Refresh-Token liegt in der SecretStorage (das kurzlebige ID-
 nur im Speicher); „Agent: Abmelden“ löscht ihn. Ein Wechsel des Web-API-Keys
 (= Projektwechsel) meldet automatisch ab.
 
+**Sobald angemeldet, laufen Chat, Inline-Edit und „In Datei übernehmen“ automatisch über
+den Proxy** (Standort-Routing serverseitig, Modell-Picker zeigt das Server-Angebot);
+ohne Anmeldung gilt übergangsweise weiter der API-Key-Pfad.
+
 ## Bedienung
 
 Agent-Icon in der Activity Bar → Aufgabe beschreiben. Der Agent zeigt seinen Plan, jedes Werkzeug als Protokollzeile und liefert am Ende eine Zusammenfassung.

@@ -14,6 +14,7 @@ const { buildSystemPrompt } = require('../lib/prompts');
 const { NOOP_LOGGER } = require('../lib/logger');
 const { buildApplyRequest, extractCode, APPLY_MAX_LINES } = require('../lib/inlineEdit');
 const { pickerModels, resolveRoute, fixedLocation } = require('../lib/modelCatalog');
+const { ProxyClient } = require('../lib/proxyClient');
 
 const SECRET_KEY = 'vscodiumAgent.firebaseApiKey';
 const STATE_KEY = 'vscodiumAgent.sessions.v1';
@@ -171,6 +172,7 @@ class ChatViewProvider {
 			appId: cfg.get('firebase.appId', ''),
 			backend: cfg.get('firebase.backend', 'googleAI'),
 			location: cfg.get('firebase.location', 'us-central1'),
+			proxyUrl: String(cfg.get('proxy.url', '')).replace(/\/+$/, ''),
 			model: cfg.get('model', 'gemini-2.5-flash'),
 			inlineEditModel: cfg.get('inlineEdit.model', 'gemini-2.5-flash'),
 			approvalMode: cfg.get('approvalMode', 'review'),
@@ -190,6 +192,17 @@ class ChatViewProvider {
 		const cfg = this.config();
 		const apiKey = await this.getApiKey();
 		const model = modelOverride || cfg.model;
+		// SaaS-Pfad (Phase S): Angemeldete sprechen den Proxy – Auth, Allowlist und
+		// Standort-Routing liegen dort serverseitig. Der API-Key-Pfad bleibt der
+		// Übergang für BYOK, bis der Rückbau kommt.
+		if (this.auth && cfg.proxyUrl && await this.auth.isSignedIn()) {
+			const auth = this.auth;
+			return new ProxyClient({
+				baseUrl: cfg.proxyUrl,
+				model,
+				getIdToken: () => auth.getIdToken(apiKey)
+			});
+		}
 		// Auto-Routing: Modelle mit festem Standort übersteuern die Location-Einstellung.
 		const route = resolveRoute(model, cfg);
 		if (route.pinned) {
@@ -203,6 +216,33 @@ class ChatViewProvider {
 			location: route.location,
 			model
 		});
+	}
+
+	/**
+	 * Modell-Angebot des Proxys für den Picker (5 Minuten gecacht; Fehler kurz gecacht,
+	 * damit ein nicht erreichbarer Proxy die Statuszeile nicht bei jedem Init blockiert).
+	 * @returns {Promise<Array<{id: string, label: string, region?: string}>|null>}
+	 */
+	async _proxyModels() {
+		const now = Date.now();
+		const url = this.config().proxyUrl;
+		const cache = this._proxyCatalog;
+		if (cache && cache.url === url && now - cache.fetchedAt < cache.ttlMs) {
+			return cache.models;
+		}
+		try {
+			const client = await this.buildClient();
+			if (client.kind !== 'proxy') { return null; }
+			// Hartes Timeout: Ein hängender Proxy darf das Chat-Panel-Init nicht blockieren.
+			const list = await client.listModels(AbortSignal.timeout(5000));
+			const models = list.map(m => ({ id: m.id, label: m.label || m.id, region: m.location }));
+			this._proxyCatalog = { url, models, fetchedAt: now, ttlMs: 5 * 60 * 1000 };
+			return models;
+		} catch (err) {
+			this.log.warn('Proxy-Katalog nicht abrufbar – lokaler Katalog bleibt aktiv', err);
+			this._proxyCatalog = { url, models: null, fetchedAt: now, ttlMs: 60 * 1000 };
+			return null;
+		}
 	}
 
 	getHost() {
@@ -335,18 +375,24 @@ class ChatViewProvider {
 	async _sendInit() {
 		const cfg = this.config();
 		const apiKey = await this.getApiKey();
+		const auth = this.auth
+			? { signedIn: await this.auth.isSignedIn(), email: await this.auth.email() }
+			: undefined;
+		// Angemeldet: Der Picker zeigt das Angebot des Proxys (serverseitige Allowlist);
+		// sonst – oder wenn der Proxy nicht erreichbar ist – den lokalen Katalog.
+		let models = null;
+		if (auth && auth.signedIn && cfg.proxyUrl) {
+			models = await this._proxyModels();
+		}
+		if (!models) { models = pickerModels(); }
 		// Normalisiert, damit Schreibweisen wie "models/x" den Katalog-Eintrag treffen;
 		// unbekannte Modelle aus den Einstellungen erhalten hier ihren Eintrag samt
 		// festem Standort (z. B. 3.x-Previews → global), statt im Webview ohne
 		// Regions-Anzeige synthetisiert zu werden.
 		const model = normalizeModelName(cfg.model);
-		const models = pickerModels();
 		if (model && !models.some(m => m.id === model)) {
-			models.push({ id: model, label: `${model} (aus den Einstellungen)`, region: fixedLocation(model) });
+			models = models.concat({ id: model, label: `${model} (aus den Einstellungen)`, region: fixedLocation(model) });
 		}
-		const auth = this.auth
-			? { signedIn: await this.auth.isSignedIn(), email: await this.auth.email() }
-			: undefined;
 		this._post({
 			type: 'init',
 			state: {
@@ -393,8 +439,8 @@ class ChatViewProvider {
 
 		try {
 			const cfg = this.config();
-			this.log.info(`Agent-Lauf gestartet (Modell: ${cfg.model}, Modus: ${cfg.approvalMode}, Backend: ${cfg.backend})`);
 			const client = await this.buildClient();
+			this.log.info(`Agent-Lauf gestartet (Modell: ${client.model}, Modus: ${cfg.approvalMode}, Weg: ${client.kind === 'proxy' ? `Proxy (${client.projectId})` : `AI Logic (${cfg.backend})`})`);
 			const host = this.getHost();
 
 			const fileTree = await host.listProjectFiles(cfg.maxTreeEntries);

@@ -4,6 +4,13 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.7.0] – 2026-07-12
+
+### Hinzugefügt
+- **Agent-Verkehr über den Proxy (SaaS-Pfad):** Wer angemeldet ist, spricht mit Chat, Inline-Edit und „In Datei übernehmen“ automatisch den Cloud-Run-Proxy (`lib/proxyClient.js` — gleiches Interface wie der bisherige Client, Authentifizierung per ID-Token, SSE-Streaming, Retry bei 429/5xx, verständliche Hinweise bei 401/404/429). Ohne Anmeldung gilt übergangsweise weiter der API-Key-Pfad.
+- **Modell-Picker zeigt das Server-Angebot:** Angemeldet bezieht der Picker die Modellliste vom Proxy (`GET /v1/models`, 5 Minuten gecacht) — der Dienst bestimmt das Angebot, inklusive Standort-Anzeige; bei nicht erreichbarem Proxy greift der lokale Katalog.
+- Der Verbindungstest nutzt beim Proxy-Pfad den Katalog-Endpunkt und verbraucht keine Modell-Tokens; das Log nennt pro Lauf den Weg („Proxy“ vs. „AI Logic“).
+
 ## [0.6.0] – 2026-07-12
 
 ### Hinzugefügt

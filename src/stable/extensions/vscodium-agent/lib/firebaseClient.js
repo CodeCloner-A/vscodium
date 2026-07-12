@@ -51,6 +51,7 @@ class FirebaseAiLogicClient {
 		this.apiKey = options.apiKey;
 		this.projectId = options.projectId;
 		this.appId = options.appId || '';
+		this.kind = 'aiLogic';
 		this.backend = options.backend === 'vertexAI' ? 'vertexAI' : 'googleAI';
 		this.location = options.location || 'us-central1';
 		this.model = normalizeModelName(options.model || 'gemini-2.5-flash');

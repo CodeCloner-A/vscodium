@@ -23,6 +23,7 @@ const { stripAnsi, normalizeCommandApproval } = require('../lib/terminalExec');
 const { MODEL_CATALOG, pickerModels, resolveRoute, fixedLocation } = require('../lib/modelCatalog');
 const { signInWithGoogle, refreshIdToken, createPkce, decodeJwtPayload } = require('../lib/firebaseAuth');
 const { AuthManager, AUTH_SECRET_KEY } = require('../lib/authManager');
+const { ProxyClient } = require('../lib/proxyClient');
 
 // ── Mock-Host (In-Memory-Dateisystem) ──────────────────────────────────────
 
@@ -296,6 +297,76 @@ async function testModelCatalog() {
 	assert.strictEqual(normalizeModelName('models/'), 'models');
 	assert.strictEqual(normalizeModelName(''), 'gemini-2.5-flash');
 	console.log('✔ Modell-Katalog: Picker-Einträge, Auto-Routing (Gemini 3.x → global), Overrides');
+}
+
+async function testProxyClient() {
+	const mk = (fetchImpl) => new ProxyClient({
+		baseUrl: 'https://proxy.example/',
+		model: 'models/gemini-3.5-flash',
+		getIdToken: async () => 'id-token-1',
+		retryDelayMs: 1,
+		fetchImpl
+	});
+
+	// URL-Aufbau (Basis ohne Trailing-Slash, Modell normalisiert), Bearer-Header, Durchreichung.
+	const calls = [];
+	const okClient = mk(async (url, init) => {
+		calls.push({ url, init });
+		return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }) };
+	});
+	assert.strictEqual(okClient.model, 'gemini-3.5-flash');
+	assert.strictEqual(okClient.projectId, 'proxy.example');
+	const res = await okClient.generateContent({ contents: [] });
+	assert.strictEqual(res.candidates[0].content.parts[0].text, 'ok');
+	assert.strictEqual(calls[0].url, 'https://proxy.example/v1/models/gemini-3.5-flash:generateContent');
+	assert.strictEqual(calls[0].init.headers.Authorization, 'Bearer id-token-1');
+
+	// Retry bei 429; Erfolg im zweiten Versuch.
+	let attempts = 0;
+	const retrying = mk(async () => {
+		attempts++;
+		if (attempts === 1) { return { ok: false, status: 429, statusText: 'Too Many Requests', json: async () => ({ error: 'Zu viele Anfragen.' }) }; }
+		return { ok: true, status: 200, json: async () => ({ candidates: [] }) };
+	});
+	await retrying.generateContent({ contents: [] });
+	assert.strictEqual(attempts, 2);
+
+	// 401 wird nicht wiederholt und trägt den Anmelde-Hinweis.
+	let tries401 = 0;
+	const unauthorized = mk(async () => {
+		tries401++;
+		return { ok: false, status: 401, statusText: 'Unauthorized', json: async () => ({ error: 'Nicht angemeldet.' }) };
+	});
+	await assert.rejects(unauthorized.generateContent({}), (err) => err.status === 401 && /anmelden/i.test(err.hint));
+	assert.strictEqual(tries401, 1);
+
+	// SSE-Streaming: onText-Fragmente + zusammengeführte Antwort (wie der Key-Pfad).
+	const sse = [
+		'data: {"candidates":[{"content":{"parts":[{"text":"Hal"}]}}]}\n\n',
+		'data: {"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}]}\n\n'
+	];
+	const streaming = mk(async (url) => {
+		assert.ok(url.endsWith(':streamGenerateContent'));
+		return {
+			ok: true, status: 200,
+			body: (async function* () { for (const part of sse) { yield Buffer.from(part, 'utf8'); } })()
+		};
+	});
+	const pieces = [];
+	const merged = await streaming.generateContentStream({ contents: [] }, undefined, (t) => pieces.push(t));
+	assert.deepStrictEqual(pieces, ['Hal', 'lo']);
+	assert.strictEqual(merged.candidates[0].content.parts[0].text, 'Hallo');
+	assert.strictEqual(merged.candidates[0].finishReason, 'STOP');
+
+	// Katalog + Ping (Verbindungstest verbraucht keine Tokens).
+	const catalog = mk(async (url) => {
+		assert.ok(url.endsWith('/v1/models'));
+		return { ok: true, status: 200, json: async () => ({ models: [{ id: 'gemini-3.5-flash', label: 'G 3.5', location: 'eu' }] }) };
+	});
+	assert.deepStrictEqual(await catalog.listModels(), [{ id: 'gemini-3.5-flash', label: 'G 3.5', location: 'eu' }]);
+	assert.ok((await catalog.ping()).includes('1 Modelle'));
+
+	console.log('✔ Proxy-Client: URLs/Bearer, Retry (429), 401-Hinweis, SSE-Streaming, Katalog/Ping');
 }
 
 async function testFirebaseAuth() {
@@ -766,6 +837,7 @@ async function main() {
 	await testRejectionFlow();
 	await testMaxIterationsGuard();
 	await testModelCatalog();
+	await testProxyClient();
 	await testFirebaseAuth();
 	await testAuthManager();
 	await testActivityIndex();

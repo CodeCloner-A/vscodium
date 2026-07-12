@@ -17,6 +17,7 @@ const vscode = require('vscode');
 const path = require('path');
 const { buildInlineEditRequest, extractCode, sanitizeStreamText } = require('../lib/inlineEdit');
 const { extractText, extractBlockReason, FirebaseAiError } = require('../lib/firebaseClient');
+const { ProxyError } = require('../lib/proxyClient');
 const { computeLineHunks, revertHunkInLines, splitLines } = require('../lib/lineDiff');
 
 const CONTEXT_LINES = 40;
@@ -221,8 +222,9 @@ class InlineEditController {
 				}
 				return null;
 			}
-			if (!state.painted && received === '' && err instanceof FirebaseAiError) {
+			if (!state.painted && received === '' && (err instanceof FirebaseAiError || err instanceof ProxyError)) {
 				// Stream kam gar nicht zustande (z. B. Endpoint/Proxy ohne SSE) → normaler Aufruf.
+				// Gilt für beide Wege: Key-Pfad (FirebaseAiError) und SaaS-Proxy (ProxyError).
 				this.log.warn('Streaming nicht verfügbar, Fallback auf generateContent', err);
 				response = await client.generateContent(request, signal);
 			} else {
