@@ -1,6 +1,6 @@
 # Roadmap — VSCodium Agent
 
-Abgeleitet aus der Feature-Chronologie von Cursor (Changelog 2023–2025), gemappt auf den Ist-Zustand dieses Forks (Stand: 12. Juli 2026, Extension v0.8.0, Basis VS Code 1.121.0). Cursor-Referenzen in Klammern zeigen, wann Cursor das jeweilige Feature gebaut hat — als Beleg für die Reihenfolge, nicht als Kopiervorlage.
+Abgeleitet aus der Feature-Chronologie von Cursor (Changelog 2023–2025), gemappt auf den Ist-Zustand dieses Forks (Stand: 13. Juli 2026, Extension v0.9.0, Basis VS Code 1.121.0). Cursor-Referenzen in Klammern zeigen, wann Cursor das jeweilige Feature gebaut hat — als Beleg für die Reihenfolge, nicht als Kopiervorlage.
 
 > **Kurswechsel 07/2026 — SaaS:** Der Fork wird als Dienst betrieben. Firebase bleibt das Rückgrat: Auth für den Login, Firestore für Chatverläufe, Nutzerdaten, Tarife und Metering. Nur die KI-Kommunikation läuft über einen Cloud-Run-Proxy als Türsteher (Vertex AI direkt: Gemini plus Claude via MaaS, SSE-Streaming). Der bisherige API-Key-Pfad (BYOK) entfällt ersatzlos, sobald der Proxy produktiv ist. Die früheren Leitplanken „Kein Login-Zwang“ und „kein SaaS-Modell“ sind damit bewusst aufgehoben — siehe Phase S.
 
