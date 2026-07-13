@@ -1,6 +1,7 @@
 /*---------------------------------------------------------------------------------------------
  * VSCodium Agent – Chat-Sidebar (WebviewViewProvider) inkl. Review-Karten, Orchestrierung
- * und persistenten Sitzungen (workspaceState, pro Projekt).
+ * und persistenten Sitzungen: workspaceState als Offline-Cache, geräteübergreifender
+ * Sync pro Nutzer und Projekt über den Proxy (Firestore, lib/sessionSync.js).
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
@@ -15,6 +16,7 @@ const { NOOP_LOGGER } = require('../lib/logger');
 const { buildApplyRequest, extractCode, APPLY_MAX_LINES } = require('../lib/inlineEdit');
 const { pickerModels, fixedLocation } = require('../lib/modelCatalog');
 const { ProxyClient, ProxyError } = require('../lib/proxyClient');
+const { workspaceKey, validRemoteSession, planSync } = require('../lib/sessionSync');
 
 const STATE_KEY = 'vscodiumAgent.sessions.v1';
 const CAPTURE_KEY = 'vscodiumAgent.lastCaptureAt';
@@ -44,6 +46,10 @@ class ChatViewProvider {
 		/** @type {WorkspaceHost|null} */
 		this.host = null;
 		this._saveTimer = null;
+		/** @type {Set<string>} lokal geänderte Sitzungen, die noch nicht hochgeladen sind */
+		this._dirtySessions = new Set();
+		this._pullStarted = false;
+		this._pushing = false;
 
 		this._loadSessions();
 
@@ -111,7 +117,14 @@ class ChatViewProvider {
 				sessions: this.sessions,
 				activeId: this.activeSessionId
 			});
+			// Huckepack auf dem entprellten Speichern: geänderte Sitzungen hochladen.
+			void this._pushDirty();
 		}, 400);
+	}
+
+	/** Inhaltliche Änderung der aktiven Sitzung vermerken (Kandidat für den Sync-Push). */
+	_markDirty() {
+		if (this.activeSessionId) { this._dirtySessions.add(this.activeSessionId); }
 	}
 
 	sessionSummaries() {
@@ -153,13 +166,112 @@ class ChatViewProvider {
 			void vscode.window.showWarningMessage('Aktive Sitzung erst nach Stopp löschbar.');
 			return;
 		}
+		const existed = this.sessions.some(s => s.id === id);
 		this.sessions = this.sessions.filter(s => s.id !== id);
+		this._dirtySessions.delete(id);
 		if (this.activeSessionId === id) {
 			this.activeSessionId = this.sessions.length > 0 ? this.sessions[0].id : null;
 			if (!this.activeSessionId) { this._createSession(); }
 		}
 		this._scheduleSave();
+		if (existed) { void this._deleteRemote(id); }
 		void this._sendInit();
+	}
+
+	// ── Sitzungs-Sync (Pull beim Start, Push huckepack auf dem Speichern) ────
+	// Fehler sind hier grundsätzlich nur Log-Einträge: Der Sync ist Komfort,
+	// workspaceState bleibt die Wahrheit auf diesem Gerät (Offline-Cache).
+
+	/** Sitzungen sind pro Projekt getrennt; der Ordnername findet dasselbe Repo auf anderen Geräten. */
+	_workspaceKey() {
+		const folder = (vscode.workspace.workspaceFolders || [])[0];
+		return workspaceKey(folder ? folder.name : '');
+	}
+
+	/** Client nur, wenn Sync eingeschaltet, Proxy konfiguriert und Nutzer angemeldet ist – sonst null. */
+	async _syncClient() {
+		const cfg = this.config();
+		if (!cfg.sessionsSync || !cfg.proxyUrl || !this.auth || !await this.auth.isSignedIn()) { return null; }
+		return this.buildClient();
+	}
+
+	/** Abgleich beim Start: neuere Remote-Stände übernehmen, lokal Neueres hochladen. */
+	async _pullSessions() {
+		try {
+			const client = await this._syncClient();
+			if (!client) { return; }
+			const ws = this._workspaceKey();
+			const remote = await client.listSessions(ws, AbortSignal.timeout(10000));
+			const plan = planSync(this.sessions, remote);
+			let changed = 0;
+			for (const id of plan.pull) {
+				// Die Sitzung eines laufenden Agenten nie unter ihm wegtauschen.
+				if (this.running && id === this.activeSessionId) { continue; }
+				const full = await client.getSession(ws, id, AbortSignal.timeout(15000));
+				if (!full || !validRemoteSession(full)) { continue; }
+				const idx = this.sessions.findIndex(s => s.id === id);
+				if (idx >= 0) { this.sessions[idx] = full; } else { this.sessions.push(full); }
+				this._dirtySessions.delete(id); // Remote-Stand ist jetzt die Wahrheit
+				changed++;
+			}
+			if (changed > 0) {
+				this.sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+				const max = vscode.workspace.getConfiguration('vscodiumAgent').get('sessions.max', 20);
+				if (this.sessions.length > max) { this.sessions = this.sessions.slice(0, max); }
+				if (!this.sessions.some(s => s.id === this.activeSessionId)) {
+					this.activeSessionId = this.sessions[0].id;
+				}
+				void this._sendInit();
+			}
+			for (const id of plan.push) { this._dirtySessions.add(id); }
+			if (changed > 0 || plan.push.length > 0) {
+				this.log.info(`Sitzungs-Sync: ${changed} Sitzung(en) übernommen, ${plan.push.length} zum Hochladen vorgemerkt`);
+				this._scheduleSave();
+			}
+		} catch (err) {
+			this.log.warn('Sitzungs-Sync: Abgleich übersprungen – lokaler Stand bleibt', err);
+		}
+	}
+
+	/** Vorgemerkte Sitzungen hochladen (entprellt über _scheduleSave, nacheinander). */
+	async _pushDirty() {
+		if (this._pushing || this._dirtySessions.size === 0) { return; }
+		this._pushing = true;
+		try {
+			const client = await this._syncClient();
+			if (!client) { return; }
+			const ws = this._workspaceKey();
+			for (const id of [...this._dirtySessions]) {
+				const session = this.sessions.find(s => s.id === id);
+				// VOR dem await austragen: Änderungen während des Uploads merken sich
+				// per _markDirty neu vor und gehen mit dem nächsten Speichern raus.
+				this._dirtySessions.delete(id);
+				if (!session || session.items.length === 0) { continue; }
+				try {
+					await client.putSession(ws, session, AbortSignal.timeout(15000));
+				} catch (err) {
+					// 413 (zu groß) nicht wieder vormerken – der Zustand heilt sich nicht von selbst.
+					if (err && err.status !== 413) { this._dirtySessions.add(id); }
+					this.log.warn(`Sitzungs-Sync: Hochladen fehlgeschlagen (Sitzung ${id})`, err);
+					break; // weitere Uploads in diesem Durchgang sparen; nächster Save versucht es erneut
+				}
+			}
+		} catch (err) {
+			this.log.warn('Sitzungs-Sync: Push übersprungen', err);
+		} finally {
+			this._pushing = false;
+		}
+	}
+
+	/** Gelöschte Sitzung auch remote entfernen (fire-and-forget). */
+	async _deleteRemote(id) {
+		try {
+			const client = await this._syncClient();
+			if (!client) { return; }
+			await client.deleteSession(this._workspaceKey(), id, AbortSignal.timeout(15000));
+		} catch (err) {
+			this.log.warn(`Sitzungs-Sync: Löschen fehlgeschlagen (Sitzung ${id})`, err);
+		}
 	}
 
 	// ── Konfiguration ─────────────────────────────────────────────────────────
@@ -168,6 +280,7 @@ class ChatViewProvider {
 		const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
 		return {
 			proxyUrl: String(cfg.get('proxy.url', '')).replace(/\/+$/, ''),
+			sessionsSync: cfg.get('sessions.sync', true),
 			model: cfg.get('model', 'gemini-2.5-flash'),
 			inlineEditModel: cfg.get('inlineEdit.model', 'gemini-2.5-flash'),
 			approvalMode: cfg.get('approvalMode', 'review'),
@@ -362,6 +475,12 @@ class ChatViewProvider {
 		let models = null;
 		if (auth && auth.signedIn && cfg.proxyUrl) {
 			models = await this._proxyModels();
+			// Einmal pro Extension-Host: Sitzungen anderer Geräte übernehmen. Läuft
+			// bewusst nebenher – ein langsamer Proxy darf das Panel-Init nicht bremsen.
+			if (cfg.sessionsSync && !this._pullStarted) {
+				this._pullStarted = true;
+				void this._pullSessions();
+			}
 		}
 		if (!models) { models = pickerModels(); }
 		// Normalisiert, damit Schreibweisen wie "models/x" den Katalog-Eintrag treffen;
@@ -407,6 +526,7 @@ class ChatViewProvider {
 		const session = this.session;
 		if (session.title === 'Neue Sitzung') {
 			session.title = text.length > 48 ? text.slice(0, 48) + '…' : text;
+			this._markDirty();
 			this._post({ type: 'sessions', sessions: this.sessionSummaries(), activeSessionId: this.activeSessionId });
 		}
 
@@ -451,6 +571,7 @@ class ChatViewProvider {
 						const item = self.items.find(i => i.kind === 'tool' && i.id === id);
 						if (item) { item.status = ok ? 'ok' : 'warn'; item.result = summary; }
 						self._post({ type: 'toolUpdate', id, status: ok ? 'ok' : 'warn', result: summary });
+						self._markDirty();
 						self._scheduleSave();
 					},
 					info: (t) => self._pushAndSend({ kind: 'info', text: t }),
@@ -573,6 +694,7 @@ class ChatViewProvider {
 				const accepted = await self._awaitDecision(info.id);
 				item.status = accepted ? 'accepted' : 'rejected';
 				self._post({ type: 'decision', id: info.id, status: item.status });
+				self._markDirty();
 				self._scheduleSave();
 				return accepted;
 			},
@@ -598,6 +720,7 @@ class ChatViewProvider {
 				}
 				item.status = accepted ? 'accepted' : 'rejected';
 				self._post({ type: 'decision', id, status: item.status, command: item.command });
+				self._markDirty();
 				self._scheduleSave();
 				return { approved: accepted, command: edited };
 			}
@@ -625,6 +748,7 @@ class ChatViewProvider {
 	_pushItem(item) {
 		this.items.push(item);
 		this.session.updatedAt = Date.now();
+		this._markDirty();
 		this._scheduleSave();
 		return item;
 	}

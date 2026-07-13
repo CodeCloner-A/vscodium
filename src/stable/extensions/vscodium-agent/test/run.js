@@ -24,6 +24,7 @@ const { MODEL_CATALOG, pickerModels, fixedLocation } = require('../lib/modelCata
 const { signInWithGoogle, refreshIdToken, createPkce, decodeJwtPayload } = require('../lib/firebaseAuth');
 const { AuthManager, AUTH_SECRET_KEY } = require('../lib/authManager');
 const { ProxyClient, formatUsage } = require('../lib/proxyClient');
+const { workspaceKey, validRemoteSession, planSync } = require('../lib/sessionSync');
 
 // ── Mock-Host (In-Memory-Dateisystem) ──────────────────────────────────────
 
@@ -372,6 +373,38 @@ async function testProxyClient() {
 		err.status === 429 && err.retryable === false && /Monatskontingent/.test(err.hint));
 	assert.strictEqual(quotaTries, 1, 'Quota-429 darf nicht wiederholt werden');
 
+	// Sitzungs-Sync: Liste, Einzelabruf (404 → null), Upload (PUT, nur Sitzungsfelder), Löschen.
+	const sessionCalls = [];
+	const sessionApi = mk(async (url, init) => {
+		sessionCalls.push({ url, init });
+		if (url.includes('/v1/sessions?')) {
+			return { ok: true, status: 200, json: async () => ({ sessions: [{ id: 's1', title: 'A', createdAt: 1, updatedAt: 2 }] }) };
+		}
+		if (url.includes('/v1/sessions/fehlt')) {
+			return { ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'Sitzung nicht gefunden.' }) };
+		}
+		if ((init && init.method) === 'PUT') {
+			return { ok: true, status: 200, json: async () => ({ ok: true }) };
+		}
+		if ((init && init.method) === 'DELETE') {
+			return { ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'weg' }) };
+		}
+		return { ok: true, status: 200, json: async () => ({ id: 's1', title: 'A', createdAt: 1, updatedAt: 2, items: [], history: [] }) };
+	});
+	assert.deepStrictEqual(await sessionApi.listSessions('Mein Projekt'), [{ id: 's1', title: 'A', createdAt: 1, updatedAt: 2 }]);
+	assert.ok(sessionCalls[0].url.endsWith('/v1/sessions?workspace=Mein%20Projekt'), 'Workspace muss URL-kodiert sein');
+	assert.strictEqual(await sessionApi.getSession('ws', 'fehlt'), null, '404 beim Einzelabruf heißt "gibt es (noch) nicht"');
+	assert.strictEqual((await sessionApi.getSession('ws', 's1')).id, 's1');
+	await sessionApi.putSession('ws', { id: 's1', title: 'A', createdAt: 1, updatedAt: 2, items: [{ kind: 'user' }], history: [], fremdesFeld: 'x' });
+	const putCall = sessionCalls.find(c => c.init && c.init.method === 'PUT');
+	const putBody = JSON.parse(putCall.init.body);
+	assert.deepStrictEqual(Object.keys(putBody).sort(), ['createdAt', 'history', 'items', 'title', 'updatedAt', 'workspace'], 'PUT trägt nur die Sitzungsfelder');
+	assert.ok(putCall.url.endsWith('/v1/sessions/s1'));
+	await sessionApi.deleteSession('ws', 's1'); // 404 beim Löschen ist kein Fehler
+	// Alter Proxy ohne Sitzungs-Endpunkte: verständlicher Hinweis statt „Modell nicht im Angebot“.
+	const oldSessions = mk(async () => ({ ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'Unbekannter Endpunkt.' }) }));
+	await assert.rejects(oldSessions.listSessions('ws'), (err) => err.status === 404 && /Sitzungs-Sync/.test(err.hint));
+
 	// Anzeigetext der Verbrauchsabfrage (deutsches Zahlenformat, Monatsname, Limit-Varianten).
 	const text = formatUsage({ month: '2026-07', plan: 'free', limit: 2000000, totalTokens: 12345, requests: 42 });
 	assert.ok(text.includes('Juli 2026') && text.includes('12.345') && text.includes('2.000.000') && text.includes('1 %'), text);
@@ -393,7 +426,54 @@ async function testProxyClient() {
 	// Auch der Streaming-Pfad reicht den Anmeldefehler unverfälscht durch.
 	await assert.rejects(authFail.generateContentStream({}, undefined, () => { }), (err) => /Nicht angemeldet/.test(err.message));
 
-	console.log('✔ Proxy-Client: URLs/Bearer, Retry (429), 401-Hinweis, SSE, Katalog/Ping, Usage & Quota-429, Anmeldefehler ohne Retry');
+	console.log('✔ Proxy-Client: URLs/Bearer, Retry (429), 401-Hinweis, SSE, Katalog/Ping, Usage & Quota-429, Sitzungs-API, Anmeldefehler ohne Retry');
+}
+
+async function testSessionSync() {
+	// Workspace-Schlüssel: Ordnername direkt; Reserviertes/Leeres fällt auf 'default'.
+	assert.strictEqual(workspaceKey('vscodium'), 'vscodium');
+	assert.strictEqual(workspaceKey('Mein Projekt'), 'Mein Projekt');
+	assert.strictEqual(workspaceKey('a/b\\c'), 'a-b-c');
+	assert.strictEqual(workspaceKey(''), 'default');
+	assert.strictEqual(workspaceKey(undefined), 'default');
+	assert.strictEqual(workspaceKey('..'), 'default');
+	assert.strictEqual(workspaceKey('__x__'), 'default');
+	assert.strictEqual(workspaceKey('l'.repeat(200)).length, 64);
+
+	// Formprüfung: Nur vollständige, plausible Remote-Sitzungen dürfen Lokales ersetzen.
+	const ok = { id: 'aaaa-bbbb', title: 't', createdAt: 1, updatedAt: 2, items: [], history: [] };
+	assert.ok(validRemoteSession(ok));
+	for (const bad of [
+		null, {}, { ...ok, id: 'böse/../id' }, { ...ok, items: 'x' },
+		{ ...ok, history: undefined }, { ...ok, updatedAt: 'gestern' }, { ...ok, title: 7 }
+	]) {
+		assert.ok(!validRemoteSession(bad), `muss abgelehnt werden: ${JSON.stringify(bad)}`);
+	}
+
+	// Abgleichplan: last-write-wins pro Sitzung über updatedAt.
+	const local = [
+		{ id: 'nur-lokal', updatedAt: 10, items: [{}] },
+		{ id: 'lokal-neuer', updatedAt: 20, items: [{}] },
+		{ id: 'remote-neuer', updatedAt: 5, items: [{}] },
+		{ id: 'gleichstand', updatedAt: 7, items: [{}] },
+		{ id: 'leer-lokal', updatedAt: 99, items: [] }
+	];
+	const remote = [
+		{ id: 'lokal-neuer', updatedAt: 15 },
+		{ id: 'remote-neuer', updatedAt: 9 },
+		{ id: 'gleichstand', updatedAt: 7 },
+		{ id: 'nur-remote', updatedAt: 3 }
+	];
+	const plan = planSync(local, remote);
+	assert.deepStrictEqual(plan.pull.sort(), ['nur-remote', 'remote-neuer'], 'pull: remote neuer oder lokal unbekannt');
+	assert.deepStrictEqual(plan.push.sort(), ['lokal-neuer', 'nur-lokal'], 'push: lokal neuer oder remote unbekannt; leere Sitzungen nie');
+
+	// Leerer Remote-Stand (Erstanmeldung): alles Nicht-Leere hochladen, nichts holen.
+	const first = planSync(local, []);
+	assert.deepStrictEqual(first.pull, []);
+	assert.strictEqual(first.push.length, 4);
+
+	console.log('✔ Sitzungs-Sync-Logik: Workspace-Schlüssel, Formprüfung, Abgleichplan (LWW, leere Sitzungen bleiben lokal)');
 }
 
 async function testFirebaseAuth() {
@@ -870,6 +950,7 @@ async function main() {
 	await testMaxIterationsGuard();
 	await testModelCatalog();
 	await testProxyClient();
+	await testSessionSync();
 	await testFirebaseAuth();
 	await testAuthManager();
 	await testActivityIndex();

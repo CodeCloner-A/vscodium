@@ -33,6 +33,8 @@ Seit v0.9.0 (BYOK-Rückbau) läuft **alle** KI-Kommunikation über den Agent-Pro
 IDE → Cloud Run (`agent-proxy/`, prüft Firebase-ID-Token, Allowlist, Quoten) →
 Vertex AI. Auch Anmeldung und Token-Erneuerung gehen über den Proxy (Auth-Relay) —
 die Extension enthält keinerlei Schlüssel, nur die öffentliche OAuth-Client-ID.
+Seit v0.10.0 synchronisiert der Proxy zusätzlich die Chat-Sitzungen nach Firestore
+(`/v1/sessions…`, pro Nutzer und Projekt; `workspaceState` bleibt Offline-Cache).
 
 ## Der Agent-Loop
 
@@ -76,6 +78,7 @@ src/stable/extensions/vscodium-agent/
 │   ├── firebaseAuth.js     Browser-Login (PKCE + Loopback), Relay-Aufrufe
 │   ├── saasConfig.js       Öffentliche OAuth-Client-ID (fest eingebaut)
 │   ├── firebaseClient.js   Gemini-Format-Helfer (SSE-Parser, Merge, Auswertung)
+│   ├── sessionSync.js      Chat-Sync-Logik: Workspace-Schlüssel, Abgleichplan (LWW)
 │   └── workspaceHost.js    VS-Code-Host: FS, Suche, Diff, Exec, Diagnostics
 ├── ui/chatViewProvider.js  Webview-Provider, Sitzung, Freigabe-Vermittlung
 ├── media/                  chat.js, chat.css, agent.svg (Webview-Assets)

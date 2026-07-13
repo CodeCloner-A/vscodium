@@ -39,6 +39,7 @@ Extension fest eingebaut (`lib/saasConfig.js` — vor dem Release eintragen).
 | `vscodiumAgent.terminal.mode` | `captured` | `terminal` = Agent-Kommandos sichtbar im „Agent“-Terminal (Shell-Integration nötig) |
 | `vscodiumAgent.maxIterations` | `24` | Schrittlimit pro Aufgabe (Drift-Schutz) |
 | `vscodiumAgent.commandTimeoutSec` | `180` | Timeout für Test-/Buildläufe |
+| `vscodiumAgent.sessions.sync` | `true` | Chat-Sitzungen geräteübergreifend synchronisieren (pro Google-Konto und Projekt); lokal bleiben Sitzungen immer erhalten |
 
 ## SaaS-Login (Phase S)
 
@@ -60,6 +61,14 @@ Für jeden Nutzer gilt ein monatliches Token-Kontingent (Details in `docs/agent-
 aktuellen Monatsverbrauch samt Limit. Ist das Kontingent erschöpft, meldet der Agent das
 klar als Fehler — erneutes Versuchen hilft dann erst im Folgemonat bzw. nach einer
 Limit-Erhöhung.
+
+**Chat-Sync (seit v0.10.0):** Angemeldet synchronisieren sich die Chat-Sitzungen
+geräteübergreifend — pro Google-Konto und Projekt (Ordnername des Workspace als
+Schlüssel), über den Proxy nach Firestore. Beim Öffnen des Chats werden neuere Stände
+anderer Geräte übernommen (last-write-wins pro Sitzung), Änderungen wandern automatisch
+nach oben, Löschen wirkt auch remote. Lokal bleibt `workspaceState` als Offline-Cache —
+ohne Netz oder ohne Anmeldung funktioniert alles wie bisher, nur eben nur lokal
+(abschaltbar über `vscodiumAgent.sessions.sync`).
 
 ## Bedienung
 

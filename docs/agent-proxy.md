@@ -7,7 +7,9 @@ Firebase-Auth-ID-Tokens, wendet die Modell-Allowlist mit serverseitigem Standort
 `generateContent`/`streamGenerateContent` (SSE) unverändert an Vertex AI durch. Tokenzahlen
 aus `usageMetadata` schreibt er pro Nutzer und Monat nach **Firestore** fort und setzt dort
 harte **Monats-Quoten** durch (zusätzlich strukturierte Logs) — Prompt- und
-Code-Inhalte werden nie protokolliert oder gespeichert.
+Code-Inhalte werden nie protokolliert. Seit v0.4.0 synchronisiert er außerdem die
+**Chat-Sitzungen** der IDE (pro Nutzer und Projekt) nach Firestore — dort liegen bewusst
+Inhalte, das ist der Zweck des Features; die Proxy-Logs bleiben auch hier inhaltsfrei.
 
 **Projektdaten** (Stand 07/2026): GCP-Projekt `controlling-man` (Projektnummer
 `476281311476`), Rechnungskonto „Firebase Payment“.
@@ -21,6 +23,10 @@ Code-Inhalte werden nie protokolliert oder gespeichert.
 | POST | `/v1/auth/refresh` | Firebase-ID-Token erneuern (Auth-Relay, ohne Bearer) |
 | GET | `/v1/models` | Modell-Katalog für den Picker |
 | GET | `/v1/usage` | Monatsverbrauch + Limit des angemeldeten Nutzers (IDE: „Agent: Verbrauch anzeigen") |
+| GET | `/v1/sessions?workspace={ws}` | Chat-Sitzungen des Nutzers im Workspace (nur Metadaten: `id`, `title`, `createdAt`, `updatedAt`) |
+| GET | `/v1/sessions/{id}?workspace={ws}` | Eine Sitzung vollständig (inkl. `items`/`history`) |
+| PUT | `/v1/sessions/{id}` | Sitzung anlegen/ersetzen (Body: `workspace`, `title`, `createdAt`, `updatedAt`, `items`, `history`) |
+| DELETE | `/v1/sessions/{id}?workspace={ws}` | Sitzung löschen (idempotent) |
 | POST | `/v1/models/{model}:generateContent` | Gemini-Request, JSON-Antwort |
 | POST | `/v1/models/{model}:streamGenerateContent` | Gemini-Request, SSE-Stream |
 
@@ -88,6 +94,35 @@ Verhalten im Detail:
   (am Stream-Ende) noch ankam — Prompt-Tokens abgebrochener Läufe bleiben also ungezählt.
 - Der Zähl-Commit läuft **vor** dem Antwort-Ende (begrenzt auf 1,5 s), weil Cloud Run
   nach dem Antwort-Ende die CPU drosselt und Hintergrundarbeit sonst verloren ginge.
+
+## Chat-Sitzungs-Sync (Firestore, seit v0.4.0)
+
+Seit dem BYOK-Rückbau hat die Extension keinen direkten Firebase-Zugang mehr — der Sync
+der Chat-Sitzungen läuft deshalb wie das Metering über den Proxy (Service-Account).
+Die **Isolation pro Nutzer erzwingt der Proxy**: Die `uid` im Firestore-Pfad stammt immer
+aus dem verifizierten ID-Token, die Sitzungs-ID aus dem URL-Pfad — Body-Werte können
+beides nicht übersteuern; die Security Rules der Datenbank bleiben zu.
+
+| Dokument | Felder | Bedeutung |
+|---|---|---|
+| `sessions/{uid}/workspaces/{ws}/items/{sessionId}` | `title`, `createdAt`, `updatedAt` (int, ms), `data` (string) | Eine Chat-Sitzung. `{ws}` ist der Ordnername des Projekts (trennt Projekte, findet dasselbe Repo auf anderen Geräten). `data` trägt `items`/`history` als JSON-String — die Listenansicht liest per Projektion nur die Metadaten. |
+
+Verhalten im Detail:
+
+- **Konfliktauflösung:** last-write-wins pro Sitzung über `updatedAt`; entschieden wird
+  clientseitig (`lib/sessionSync.js` der Extension), der Proxy speichert nur.
+- **Fail-closed, aber verlustfrei:** Ist Firestore nicht erreichbar, antworten die
+  Sitzungs-Endpunkte 502 — der Client behält seinen lokalen Stand (`workspaceState`
+  als Offline-Cache) und versucht es beim nächsten Speichern erneut.
+- **Guards:** Nutzer-ID, Workspace-Schlüssel (kein `/`, nicht `.`/`..`/`__…__`, max.
+  100 Zeichen) und Sitzungs-ID werden validiert, bevor daraus Firestore-Pfade werden.
+  Dokumente sind auf ~900 KiB gedeckelt (413; Firestore-Limit ist 1 MiB) — eine zu
+  große Sitzung bleibt einfach lokal.
+- **Datensparsamkeit:** Die Logs der Sitzungs-Endpunkte tragen nur Pfadform
+  (`/v1/sessions`, `/v1/sessions/{id}`), Methode, Status und Dauer — nie Sitzungs-IDs,
+  Titel oder Inhalte.
+- Der Service-Account braucht keine neuen Rollen (`roles/datastore.user` deckt den
+  Sync ab, siehe Schritt 3 im Deploy).
 
 ## Umgebungsvariablen
 

@@ -17,6 +17,10 @@
  *                                                        per-IP-Rate-Limit, s. lib/authRelay.js)
  *   GET  /v1/models                                     Katalog für den Modell-Picker
  *   GET  /v1/usage                                      Monatsverbrauch + Limit des Nutzers
+ *   GET  /v1/sessions?workspace={ws}                    Chat-Sitzungen des Nutzers (Metadaten)
+ *   GET  /v1/sessions/{id}?workspace={ws}               Eine Sitzung vollständig
+ *   PUT  /v1/sessions/{id}                              Sitzung anlegen/ersetzen (Sync-Push)
+ *   DELETE /v1/sessions/{id}?workspace={ws}             Sitzung löschen
  *   POST /v1/models/{model}:generateContent             Gemini-Request, JSON-Antwort
  *   POST /v1/models/{model}:streamGenerateContent       Gemini-Request, SSE-Antwort
  *--------------------------------------------------------------------------------------------*/
@@ -28,10 +32,14 @@ const { createVerifier } = require('./lib/verifyIdToken');
 const { createVertexClient } = require('./lib/vertex');
 const { createMeter } = require('./lib/metering');
 const { createAuthRelay } = require('./lib/authRelay');
+const { createSessionStore } = require('./lib/sessions');
 const { findModel, publicCatalog } = require('./lib/catalog');
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 64 * 1024;
+// Sitzungs-PUT: Nutzdaten sind auf ~900 KiB gedeckelt (lib/sessions.js); hier nur der
+// grobe Transport-Deckel gegen absichtlich aufgeblähte Requests.
+const MAX_SESSION_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_TRACKED_USERS = 10000;
 
 /** Einfaches Sliding-Window-Limit pro Schlüssel (pro Instanz; Monats-Quoten setzt das Firestore-Metering durch). */
@@ -163,6 +171,12 @@ function createServer(options) {
 		freeMonthlyTokens: options.freeMonthlyTokens,
 		log
 	});
+	// Chat-Sitzungs-Sync (sessions: null schaltet ihn ab, z. B. in Tests) – gleiche
+	// Firestore-Datenbank wie das Metering, Isolation pro Nutzer über die verifizierte uid.
+	const sessions = options.sessions !== undefined ? options.sessions : createSessionStore({
+		project: projectId,
+		log
+	});
 	const allow = createRateLimiter({
 		limit: options.rateLimitRpm === undefined ? 30 : options.rateLimitRpm,
 		windowMs: 60000
@@ -250,6 +264,59 @@ function createServer(options) {
 					return send(res, 200, await meter.snapshot(user.uid));
 				} catch (err) {
 					return send(res, 502, { error: `Verbrauchsdaten nicht verfügbar: ${err.message}` });
+				}
+			}
+
+			// Chat-Sitzungs-Sync. Fehler hier sind fail-closed (der Client behält seinen
+			// lokalen Stand als Offline-Cache) – anders als das fail-open-Metering.
+			if (url.pathname === '/v1/sessions' || url.pathname.startsWith('/v1/sessions/')) {
+				if (!sessions) { return send(res, 404, { error: 'Sitzungs-Sync nicht konfiguriert.' }); }
+				let sessionId = '';
+				if (url.pathname !== '/v1/sessions') {
+					try {
+						sessionId = decodeURIComponent(url.pathname.slice('/v1/sessions/'.length));
+					} catch (_e) {
+						return send(res, 400, { error: 'Ungültige Sitzungs-ID.' });
+					}
+				}
+				const workspace = url.searchParams.get('workspace') || '';
+				let status = 200;
+				try {
+					if (req.method === 'GET' && !sessionId) {
+						return send(res, 200, { sessions: await sessions.list(user.uid, workspace) });
+					}
+					if (req.method === 'GET') {
+						const session = await sessions.get(user.uid, workspace, sessionId);
+						if (!session) { status = 404; return send(res, 404, { error: 'Sitzung nicht gefunden.' }); }
+						return send(res, 200, session);
+					}
+					if (req.method === 'PUT' && sessionId) {
+						const body = await readJson(req, MAX_SESSION_BODY_BYTES);
+						// Die uid kommt aus dem Token, die id aus dem Pfad – Body-Werte
+						// können beides nie übersteuern (kein Schreiben in fremde Pfade).
+						await sessions.put(user.uid, body && body.workspace, { ...body, id: sessionId });
+						return send(res, 200, { ok: true });
+					}
+					if (req.method === 'DELETE' && sessionId) {
+						await sessions.remove(user.uid, workspace, sessionId);
+						return send(res, 200, { ok: true });
+					}
+					status = 404;
+					return send(res, 404, { error: 'Unbekannter Endpunkt.' });
+				} catch (err) {
+					// Validierungsfehler (400/403/413) unverändert; alles andere ist ein
+					// Firestore-/Netzproblem → 502, der Client bleibt auf dem lokalen Stand.
+					status = err && err.status && err.status < 500 ? err.status : 502;
+					return send(res, status, {
+						error: status === 502 ? `Sitzungs-Sync nicht verfügbar: ${err.message}` : err.message
+					});
+				} finally {
+					// Log nur Pfadform + Status – nie Titel oder Inhalte (Datensparsamkeit).
+					log({
+						severity: status < 400 || status === 404 ? 'INFO' : 'WARNING',
+						uid: user.uid, path: sessionId ? '/v1/sessions/{id}' : '/v1/sessions',
+						method: req.method, status, durationMs: Date.now() - started
+					});
 				}
 			}
 

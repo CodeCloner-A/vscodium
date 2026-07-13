@@ -2,7 +2,7 @@
   "name": "vscodium-agent",
   "displayName": "VSCodium Agent",
   "description": "Integrierter KI-Agent (Gemini über den Agent-Proxy): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
@@ -174,6 +174,11 @@
           "type": "boolean",
           "default": true,
           "description": "Agent-Chat beim Start der IDE automatisch öffnen."
+        },
+        "vscodiumAgent.sessions.sync": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Chat-Sitzungen geräteübergreifend synchronisieren (pro Google-Konto und Projekt, über den Agent-Proxy in Firestore). Lokal bleiben die Sitzungen immer erhalten (Offline-Cache)."
         },
         "vscodiumAgent.sessions.max": {
           "type": "number",

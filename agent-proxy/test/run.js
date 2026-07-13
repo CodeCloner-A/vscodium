@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const { createVerifier, TokenError } = require('../lib/verifyIdToken');
 const { createVertexClient, hostFor } = require('../lib/vertex');
 const { createMeter, monthKey } = require('../lib/metering');
+const { createSessionStore, validWorkspace } = require('../lib/sessions');
 const { createAuthRelay } = require('../lib/authRelay');
 const { MODELS, findModel, publicCatalog } = require('../lib/catalog');
 const { createServer, createRateLimiter, createUsageScanner } = require('../server');
@@ -551,6 +552,191 @@ async function testGlobalRateLimitHttp() {
 	}
 }
 
+// ── Chat-Sitzungs-Sync (Firestore-Mock) ─────────────────────────────────────
+
+/** Firestore-Attrappe für den Session-Store: dokumentweise In-Memory-Map. */
+function fakeSessionFirestore() {
+	const docs = new Map(); // Pfad unter /documents → fields
+	const calls = [];
+	const fetchImpl = async (url, init) => {
+		const method = (init && init.method) || 'GET';
+		const body = init && init.body ? JSON.parse(init.body) : undefined;
+		calls.push({ url, method, body });
+		const path = new URL(url).pathname.split('/documents')[1];
+		if (method === 'POST' && path.endsWith(':runQuery')) {
+			const parent = decodeURIComponent(path.slice(0, -':runQuery'.length));
+			const out = [];
+			for (const [p, fields] of docs) {
+				if (p.startsWith(`${parent}/items/`)) {
+					out.push({ document: { name: `projects/x/databases/(default)/documents${p}`, fields } });
+				}
+			}
+			// Firestore sortiert serverseitig; die Attrappe bildet das orderBy nach.
+			out.sort((a, b) => parseInt(b.document.fields.updatedAt.integerValue, 10) - parseInt(a.document.fields.updatedAt.integerValue, 10));
+			return { ok: true, status: 200, json: async () => out.length ? out : [{ readTime: 'x' }], text: async () => '' };
+		}
+		const key = decodeURIComponent(path);
+		if (method === 'GET') {
+			if (!docs.has(key)) { return { ok: false, status: 404, json: async () => ({}), text: async () => 'fehlt' }; }
+			return { ok: true, status: 200, json: async () => ({ name: key, fields: docs.get(key) }), text: async () => '' };
+		}
+		if (method === 'PATCH') {
+			docs.set(key, body.fields);
+			return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+		}
+		if (method === 'DELETE') {
+			docs.delete(key);
+			return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+		}
+		throw new Error(`Unerwarteter Firestore-Aufruf: ${method} ${url}`);
+	};
+	return { fetchImpl, calls, docs };
+}
+
+async function testSessionStore() {
+	// Workspace-Schlüssel: Ordnernamen sind ok, Pfad-Tricks und Reserviertes nicht.
+	assert.ok(validWorkspace('vscodium') && validWorkspace('Mein Projekt') && validWorkspace('äöü-repo'));
+	for (const bad of ['', '.', '..', 'a/b', '__reserviert__', 'x'.repeat(101), 42, undefined]) {
+		assert.ok(!validWorkspace(bad), `Workspace ${JSON.stringify(bad)} muss abgelehnt werden`);
+	}
+
+	const fs = fakeSessionFirestore();
+	const store = createSessionStore({ project: PROJECT, fetchImpl: fs.fetchImpl, getAccessToken: async () => 'sa-token' });
+
+	// Roundtrip: put → get liefert die Sitzung inkl. items/history zurück.
+	const session = {
+		id: 'aaaaaaaa-1111-2222-3333-444444444444',
+		title: 'Bugfix besprechen',
+		createdAt: 1000,
+		updatedAt: 2000,
+		items: [{ kind: 'user', text: 'Hallo' }, { kind: 'assistant', text: 'Hi!' }],
+		history: [{ role: 'user', parts: [{ text: 'Hallo' }] }]
+	};
+	await store.put('user-123', 'vscodium', session);
+	const loaded = await store.get('user-123', 'vscodium', session.id);
+	assert.deepStrictEqual(loaded, session);
+
+	// Der Firestore-Pfad isoliert pro Nutzer und Workspace.
+	const patch = fs.calls.find(c => c.method === 'PATCH');
+	assert.ok(patch.url.includes('/sessions/user-123/workspaces/vscodium/items/'), patch.url);
+
+	// Liste: nur Metadaten (Projektion ohne data), sortiert nach updatedAt absteigend.
+	await store.put('user-123', 'vscodium', { ...session, id: 'bbbbbbbb-1111-2222-3333-444444444444', title: 'Neuer', updatedAt: 9000 });
+	const list = await store.list('user-123', 'vscodium');
+	assert.deepStrictEqual(list.map(s => s.title), ['Neuer', 'Bugfix besprechen']);
+	assert.ok(!('items' in list[0]) && !('data' in list[0]), 'Liste darf keine Inhalte tragen');
+	const query = fs.calls.find(c => c.url.includes(':runQuery')).body.structuredQuery;
+	assert.deepStrictEqual(query.select.fields.map(f => f.fieldPath).sort(), ['createdAt', 'title', 'updatedAt']);
+	assert.strictEqual(query.orderBy[0].field.fieldPath, 'updatedAt');
+
+	// Anderer Workspace desselben Nutzers: leere Liste (saubere Projekt-Trennung).
+	assert.deepStrictEqual(await store.list('user-123', 'anderes-repo'), []);
+
+	// get auf Unbekanntes → null (kein Fehler); remove ist idempotent.
+	assert.strictEqual(await store.get('user-123', 'vscodium', 'cccccccc-1111-2222-3333-444444444444'), null);
+	await store.remove('user-123', 'vscodium', session.id);
+	await store.remove('user-123', 'vscodium', session.id);
+	assert.strictEqual(await store.get('user-123', 'vscodium', session.id), null);
+
+	// Guards: kaputte uid → 403; kaputter Workspace/ID/Zeitstempel → 400; Übergröße → 413.
+	await assert.rejects(store.list('../fremd', 'ws'), (e) => e.status === 403);
+	await assert.rejects(store.list('user-123', 'a/b'), (e) => e.status === 400);
+	await assert.rejects(store.get('user-123', 'ws', 'kein uuid!'), (e) => e.status === 400);
+	await assert.rejects(store.put('user-123', 'ws', { ...session, updatedAt: 'gestern' }), (e) => e.status === 400);
+	await assert.rejects(store.put('user-123', 'ws', { ...session, items: 'kein array' }), (e) => e.status === 400);
+	const tiny = createSessionStore({ project: PROJECT, fetchImpl: fs.fetchImpl, getAccessToken: async () => 't', maxDataBytes: 50 });
+	await assert.rejects(tiny.put('user-123', 'ws', session), (e) => e.status === 413);
+
+	// Titel wird gedeckelt statt abgelehnt.
+	await store.put('user-123', 'vscodium', { ...session, title: 'x'.repeat(500) });
+	assert.strictEqual((await store.get('user-123', 'vscodium', session.id)).title.length, 200);
+
+	console.log('✔ Session-Store: Roundtrip, Pfad-Isolation, Metadaten-Liste, Workspace-Trennung, Guards (403/400/413)');
+}
+
+async function testSessionsHttp() {
+	// Ohne Store (sessions: null) → 404; mit Store: CRUD über HTTP inkl. Auth-Gate.
+	const bare = createServer({ projectId: PROJECT, verify: makeVerifier(), vertex: { call: async () => ({}) }, meter: null, sessions: null, log: () => { } });
+	await new Promise((resolve) => bare.listen(0, resolve));
+	try {
+		const res = await fetch(`http://127.0.0.1:${bare.address().port}/v1/sessions?workspace=x`, {
+			headers: { 'Authorization': `Bearer ${signToken({})}` }
+		});
+		assert.strictEqual(res.status, 404);
+	} finally {
+		bare.close();
+	}
+
+	const fs = fakeSessionFirestore();
+	const store = createSessionStore({ project: PROJECT, fetchImpl: fs.fetchImpl, getAccessToken: async () => 'sa-token' });
+	const logs = [];
+	const server = createServer({
+		projectId: PROJECT, verify: makeVerifier(), vertex: { call: async () => ({}) },
+		rateLimitRpm: 100, meter: null, sessions: store, log: (e) => logs.push(e)
+	});
+	await new Promise((resolve) => server.listen(0, resolve));
+	const base = `http://127.0.0.1:${server.address().port}`;
+	const auth = { 'Authorization': `Bearer ${signToken({})}` };
+	const id = 'dddddddd-1111-2222-3333-444444444444';
+	try {
+		// Ohne Token keine Sitzungen.
+		assert.strictEqual((await fetch(`${base}/v1/sessions?workspace=vscodium`)).status, 401);
+
+		// PUT → GET-Liste → GET einzeln → DELETE.
+		const put = await fetch(`${base}/v1/sessions/${id}`, {
+			method: 'PUT', headers: auth,
+			body: JSON.stringify({
+				workspace: 'vscodium', title: 'Sitzung A', createdAt: 1, updatedAt: 2,
+				items: [{ kind: 'user', text: 'geheimer Inhalt' }], history: []
+			})
+		});
+		assert.strictEqual(put.status, 200);
+
+		const list = await (await fetch(`${base}/v1/sessions?workspace=vscodium`, { headers: auth })).json();
+		assert.deepStrictEqual(list.sessions, [{ id, title: 'Sitzung A', createdAt: 1, updatedAt: 2 }]);
+
+		const one = await (await fetch(`${base}/v1/sessions/${id}?workspace=vscodium`, { headers: auth })).json();
+		assert.strictEqual(one.items[0].text, 'geheimer Inhalt');
+
+		// Body kann weder uid noch id übersteuern: id kommt aus dem Pfad.
+		await fetch(`${base}/v1/sessions/${id}`, {
+			method: 'PUT', headers: auth,
+			body: JSON.stringify({ workspace: 'vscodium', id: 'eeeeeeee-9999-9999-9999-999999999999', uid: 'fremder', title: 'B', createdAt: 1, updatedAt: 3, items: [], history: [] })
+		});
+		const still = await (await fetch(`${base}/v1/sessions?workspace=vscodium`, { headers: auth })).json();
+		assert.deepStrictEqual(still.sessions.map(s => s.id), [id], 'Body-id/uid dürfen den Pfad nicht übersteuern');
+
+		// Validierung über HTTP: fehlender Workspace → 400, unbekannte Sitzung → 404.
+		assert.strictEqual((await fetch(`${base}/v1/sessions`, { headers: auth })).status, 400);
+		assert.strictEqual((await fetch(`${base}/v1/sessions/${id}2222-3333-4444`, { headers: auth })).status, 400);
+		assert.strictEqual((await fetch(`${base}/v1/sessions/ffffffff-1111-2222-3333-444444444444?workspace=vscodium`, { headers: auth })).status, 404);
+
+		const del = await fetch(`${base}/v1/sessions/${id}?workspace=vscodium`, { method: 'DELETE', headers: auth });
+		assert.strictEqual(del.status, 200);
+		assert.deepStrictEqual((await (await fetch(`${base}/v1/sessions?workspace=vscodium`, { headers: auth })).json()).sessions, []);
+
+		// Firestore-Ausfall → 502 (fail-closed), der Client behält den lokalen Stand.
+		const brokenStore = createSessionStore({ project: PROJECT, fetchImpl: async () => { throw new Error('Firestore weg'); }, getAccessToken: async () => 't' });
+		const broken = createServer({ projectId: PROJECT, verify: makeVerifier(), vertex: { call: async () => ({}) }, meter: null, sessions: brokenStore, log: () => { } });
+		await new Promise((resolve) => broken.listen(0, resolve));
+		try {
+			assert.strictEqual((await fetch(`http://127.0.0.1:${broken.address().port}/v1/sessions?workspace=x`, { headers: auth })).status, 502);
+		} finally {
+			broken.close();
+		}
+
+		// Privacy: Logs tragen Pfadform/Status, nie Titel oder Chat-Inhalte.
+		const sessionLogs = logs.filter(l => l.path && l.path.startsWith('/v1/sessions'));
+		assert.ok(sessionLogs.length >= 5);
+		assert.ok(!JSON.stringify(sessionLogs).match(/Sitzung A|geheimer Inhalt/), 'Session-Logs dürfen keine Inhalte tragen');
+		assert.ok(sessionLogs.every(l => l.path === '/v1/sessions' || l.path === '/v1/sessions/{id}'), 'Logs tragen nur die Pfadform, nie IDs');
+
+		console.log('✔ Sitzungs-Sync über HTTP: Auth-Gate, CRUD, Pfad schlägt Body, 400/404, 502 fail-closed, Logs ohne Inhalte');
+	} finally {
+		server.close();
+	}
+}
+
 // ── Auth-Relay ──────────────────────────────────────────────────────────────
 
 /** Fake-ID-Token mit lesbarer E-Mail-Nutzlast (Signatur egal – das Relay prüft nicht). */
@@ -730,6 +916,8 @@ async function main() {
 	await testRateLimiterAndScanner();
 	await testMetering();
 	await testMeteringHttp();
+	await testSessionStore();
+	await testSessionsHttp();
 	await testHttpServer();
 	await testRateLimitHttp();
 	await testGlobalRateLimitHttp();

@@ -47,6 +47,11 @@ function activate(context) {
 	context.subscriptions.push(context.secrets.onDidChange((e) => {
 		if (e.key === AUTH_SECRET_KEY) {
 			auth.invalidate();
+			// Konto könnte gewechselt haben (An-/Abmelden, auch im anderen Fenster):
+			// den Sitzungs-Sync neu abgleichen lassen statt mit dem alten Konto-Stand
+			// weiterzuarbeiten. (Feuert auch bei Token-Rotation – ein gelegentlicher
+			// zusätzlicher Abgleich ist unkritisch, er ist idempotent.)
+			provider._pullStarted = false;
 			void provider._sendInit();
 		}
 	}));

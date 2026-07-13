@@ -4,6 +4,15 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.10.0] – 2026-07-13
+
+### Hinzugefügt
+- **Chat-Sync (Phase S, Roadmap-Punkt „Nutzerdaten & Chat-Sync“):** Chat-Sitzungen synchronisieren sich geräteübergreifend — pro Google-Konto und Projekt (Workspace-Ordnername als Schlüssel). Da der Client seit dem BYOK-Rückbau keinen direkten Firebase-Zugang mehr hat, läuft der Sync wie das Metering über den Proxy (`GET/PUT/DELETE /v1/sessions…`, Proxy v0.4.0; Firestore `sessions/{uid}/workspaces/{ws}/items/{id}`, Isolation strikt über die verifizierte Nutzer-ID). Beim Öffnen des Chats werden neuere Stände anderer Geräte übernommen (last-write-wins pro Sitzung über `updatedAt`), Änderungen wandern huckepack auf dem entprellten Speichern nach oben, Löschen wirkt auch remote. `workspaceState` bleibt als Offline-Cache immer erhalten — ein nicht erreichbarer Proxy kostet nur den Abgleich, nie Sitzungen.
+- Neue Einstellung `vscodiumAgent.sessions.sync` (Standard: an) schaltet den Sync ab, ohne die lokale Persistenz zu berühren.
+
+### Sicherheit
+- Sitzungs-Endpunkte des Proxys validieren Nutzer-ID, Workspace-Schlüssel und Sitzungs-ID, bevor daraus Firestore-Pfade werden; die Nutzer-ID stammt ausschließlich aus dem verifizierten ID-Token, die Sitzungs-ID aus dem URL-Pfad — Body-Werte können beides nicht übersteuern. Dokumente sind auf ~900 KiB gedeckelt (413 statt Firestore-Fehler); Proxy-Logs tragen nur Pfadform, Status und Dauer, nie Titel oder Chat-Inhalte.
+
 ## [0.9.0] – 2026-07-13
 
 ### Entfernt

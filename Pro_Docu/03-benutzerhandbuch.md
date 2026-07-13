@@ -43,7 +43,9 @@ Anzeichen: Der Agent ändert Dinge, die mit der Aufgabe nichts zu tun haben, ode
 
 ## Sitzungen und Gedächtnis
 
-Innerhalb einer Sitzung erinnert sich der Agent an den bisherigen Verlauf (Folgeaufgaben wie „und jetzt dasselbe für die Login-Seite" funktionieren). **＋ Neue Sitzung** setzt alles zurück. Nach einem IDE-Neustart beginnt automatisch eine frische Sitzung.
+Innerhalb einer Sitzung erinnert sich der Agent an den bisherigen Verlauf (Folgeaufgaben wie „und jetzt dasselbe für die Login-Seite" funktionieren). **＋ Neue Sitzung** beginnt einen frischen Verlauf; über das Dropdown in der Panel-Titelzeile lassen sich frühere Sitzungen wieder öffnen oder löschen. Sitzungen bleiben pro Projekt gespeichert und überleben IDE-Neustarts.
+
+Angemeldet synchronisieren sich die Sitzungen zusätzlich **geräteübergreifend** (pro Google-Konto und Projekt, seit v0.10.0): Dasselbe Repo auf einem anderen Rechner zeigt nach dem Öffnen des Chats die dort noch fehlenden Sitzungen. Ohne Netz funktioniert alles wie bisher — lokal geht nichts verloren. Abschaltbar über die Einstellung `vscodiumAgent.sessions.sync`.
 
 ## Modellwahl
 
@@ -56,6 +58,6 @@ Standard ist `gemini-2.5-flash` (schnell, günstig). Für anspruchsvolle Refacto
 | Kommandopalette | Strg+Shift+P |
 | Agent-Panel | Roboter-Symbol, Aktivitätsleiste |
 | Senden / Zeilenumbruch | Enter / Shift+Enter |
-| API-Key setzen/löschen, Verbindungstest | Kommandopalette → „Agent: …" |
+| Anmelden/Abmelden, Verbindungstest, Verbrauch | Kommandopalette → „Agent: …" |
 
 <!-- ENDE PRO_DOCU -->

@@ -194,6 +194,63 @@ class ProxyClient {
 		return response.json();
 	}
 
+	// ── Chat-Sitzungs-Sync (GET/PUT/DELETE /v1/sessions…) ────────────────────
+
+	/** Sitzungs-Metadaten des Workspaces ({id, title, createdAt, updatedAt}[]). */
+	async listSessions(workspace, signal) {
+		const response = await this.fetchImpl(`${this.baseUrl}/v1/sessions?workspace=${encodeURIComponent(workspace)}`, {
+			headers: { 'Authorization': `Bearer ${await this.getIdToken()}` },
+			signal
+		});
+		if (!response.ok) {
+			const err = await this._errorFromResponse(response);
+			if (err.status === 404) {
+				err.hint = 'Der Proxy bietet keinen Sitzungs-Sync an (ältere Proxy-Version) – Sitzungen bleiben lokal.';
+			}
+			throw err;
+		}
+		const json = await response.json();
+		return Array.isArray(json.sessions) ? json.sessions : [];
+	}
+
+	/** Volle Sitzung – oder null, wenn sie remote (noch) nicht existiert. */
+	async getSession(workspace, id, signal) {
+		const response = await this.fetchImpl(
+			`${this.baseUrl}/v1/sessions/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
+			{ headers: { 'Authorization': `Bearer ${await this.getIdToken()}` }, signal }
+		);
+		if (response.status === 404) { return null; }
+		if (!response.ok) { throw await this._errorFromResponse(response); }
+		return response.json();
+	}
+
+	/** Sitzung hochladen (Upsert, last-write-wins über updatedAt). */
+	async putSession(workspace, session, signal) {
+		const response = await this.fetchImpl(`${this.baseUrl}/v1/sessions/${encodeURIComponent(session.id)}`, {
+			method: 'PUT',
+			headers: await this._headers(),
+			body: JSON.stringify({
+				workspace,
+				title: session.title,
+				createdAt: session.createdAt,
+				updatedAt: session.updatedAt,
+				items: session.items,
+				history: session.history
+			}),
+			signal
+		});
+		if (!response.ok) { throw await this._errorFromResponse(response); }
+	}
+
+	/** Sitzung remote löschen; 404 (alter Proxy/bereits weg) ist kein Fehler. */
+	async deleteSession(workspace, id, signal) {
+		const response = await this.fetchImpl(
+			`${this.baseUrl}/v1/sessions/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
+			{ method: 'DELETE', headers: { 'Authorization': `Bearer ${await this.getIdToken()}` }, signal }
+		);
+		if (!response.ok && response.status !== 404) { throw await this._errorFromResponse(response); }
+	}
+
 	async _errorFromResponse(response) {
 		if (!response) { return new ProxyError('Keine Antwort vom Agent-Proxy.'); }
 		let message = '';
