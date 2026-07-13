@@ -8,6 +8,26 @@
 const METADATA_TOKEN_URL = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token';
 
 /**
+ * Access-Token des Cloud-Run-Service-Accounts vom Metadata-Server, mit Cache bis kurz
+ * vor Ablauf. Wird auch vom Firestore-Metering genutzt (cloud-platform-Scope deckt beides).
+ */
+function createMetadataTokenSource(fetchImpl = fetch) {
+	let cached = { token: null, expiresAt: 0 };
+	return async function getAccessToken() {
+		const nowSec = Math.floor(Date.now() / 1000);
+		if (cached.token && nowSec < cached.expiresAt) { return cached.token; }
+		const res = await fetchImpl(METADATA_TOKEN_URL, { headers: { 'Metadata-Flavor': 'Google' } });
+		if (!res.ok) { throw new Error(`Metadata-Server antwortet nicht (${res.status}).`); }
+		const json = await res.json();
+		cached = {
+			token: json.access_token,
+			expiresAt: nowSec + Math.max(60, (json.expires_in || 300) - 60)
+		};
+		return cached.token;
+	};
+}
+
+/**
  * Endpunkt-Host je Standort: 'global' → globaler Endpunkt, 'eu'/'us' → jurisdiktionale
  * Multiregion (rep-Hosts, Datenresidenz), sonst regionaler Endpunkt.
  */
@@ -26,19 +46,7 @@ function createVertexClient(options) {
 	if (!project) { throw new Error('project erforderlich.'); }
 	const fetchImpl = options.fetchImpl || fetch;
 
-	let cached = { token: null, expiresAt: 0 };
-	const getAccessToken = options.getAccessToken || (async () => {
-		const nowSec = Math.floor(Date.now() / 1000);
-		if (cached.token && nowSec < cached.expiresAt) { return cached.token; }
-		const res = await fetchImpl(METADATA_TOKEN_URL, { headers: { 'Metadata-Flavor': 'Google' } });
-		if (!res.ok) { throw new Error(`Metadata-Server antwortet nicht (${res.status}).`); }
-		const json = await res.json();
-		cached = {
-			token: json.access_token,
-			expiresAt: nowSec + Math.max(60, (json.expires_in || 300) - 60)
-		};
-		return cached.token;
-	});
+	const getAccessToken = options.getAccessToken || createMetadataTokenSource(fetchImpl);
 
 	function url(model, task, stream) {
 		const host = hostFor(model.location);
@@ -67,4 +75,4 @@ function createVertexClient(options) {
 	return { call, url };
 }
 
-module.exports = { createVertexClient, hostFor, METADATA_TOKEN_URL };
+module.exports = { createVertexClient, createMetadataTokenSource, hostFor, METADATA_TOKEN_URL };

@@ -29,7 +29,7 @@ Die Tests decken ab: Tool-Grundfunktionen (Zeilenbereiche, Suche, Fehlerpfade), 
 
 ## Webview-Protokoll (UI ↔ Extension)
 
-Nachrichten Webview → Extension: `ready`, `sendTask{text}`, `stop`, `editDecision{id,accept}`, `commandDecision{id,accept}`, `showDiff{changeId}`, `newSession`, `openSettings`, `setApiKey`. Extension → Webview: `init{state}`, `append{item}`, `toolUpdate{id,status,result}`, `decision{id,status}`, `running{value}`. Der Verlauf wird extensionseitig gehalten (`items`) und bei `ready` komplett neu gerendert — die Webview ist damit jederzeit rekonstruierbar.
+Nachrichten Webview → Extension: `ready`, `sendTask{text}`, `stop`, `editDecision{id,accept}`, `commandDecision{id,accept}`, `showDiff{changeId}`, `newSession`, `openSettings`, `authClick` (Anmelden bzw. Konto-Menü — der API-Key-Pfad ist mit dem BYOK-Rückbau v0.9.0 entfallen). Extension → Webview: `init{state}`, `append{item}`, `toolUpdate{id,status,result}`, `decision{id,status}`, `running{value}`. Der Verlauf wird extensionseitig gehalten (`items`) und bei `ready` komplett neu gerendert — die Webview ist damit jederzeit rekonstruierbar.
 
 ## Debugging
 

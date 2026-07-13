@@ -14,16 +14,16 @@ const crypto = require('crypto');
 const { AgentRun } = require('../lib/agentController');
 const { executeTool, countOccurrences } = require('../lib/tools');
 const { buildSystemPrompt } = require('../lib/prompts');
-const { normalizeModelName, createSseParser, mergeStreamResponses, FirebaseAiLogicClient } = require('../lib/firebaseClient');
+const { normalizeModelName, createSseParser, mergeStreamResponses } = require('../lib/firebaseClient');
 const { ActivityIndex } = require('../lib/activityIndex');
 const { createLogger, formatDetail, NOOP_LOGGER } = require('../lib/logger');
 const { buildInlineEditRequest, buildApplyRequest, extractCode, sanitizeStreamText, APPLY_MAX_LINES } = require('../lib/inlineEdit');
 const { computeLineHunks, revertHunkInLines, splitLines } = require('../lib/lineDiff');
 const { stripAnsi, normalizeCommandApproval } = require('../lib/terminalExec');
-const { MODEL_CATALOG, pickerModels, resolveRoute, fixedLocation } = require('../lib/modelCatalog');
+const { MODEL_CATALOG, pickerModels, fixedLocation } = require('../lib/modelCatalog');
 const { signInWithGoogle, refreshIdToken, createPkce, decodeJwtPayload } = require('../lib/firebaseAuth');
 const { AuthManager, AUTH_SECRET_KEY } = require('../lib/authManager');
-const { ProxyClient } = require('../lib/proxyClient');
+const { ProxyClient, formatUsage } = require('../lib/proxyClient');
 
 // ── Mock-Host (In-Memory-Dateisystem) ──────────────────────────────────────
 
@@ -253,40 +253,8 @@ async function testModelCatalog() {
 	assert.strictEqual(picker.find(m => m.id === 'gemini-3.5-flash').region, 'global', 'fester Standort muss im Picker sichtbar sein');
 	assert.strictEqual(picker.find(m => m.id === 'gemini-2.5-flash').region, undefined, 'regional freie Modelle ohne Regions-Anzeige');
 
-	// vertexAI: 3.x wird auf global gepinnt, 2.5 respektiert die Location-Einstellung.
-	assert.deepStrictEqual(
-		resolveRoute('gemini-3.5-flash', { backend: 'vertexAI', location: 'us-central1' }),
-		{ backend: 'vertexAI', location: 'global', pinned: true }
-	);
-	assert.deepStrictEqual(
-		resolveRoute('gemini-3.5-flash', { backend: 'vertexAI', location: 'global' }),
-		{ backend: 'vertexAI', location: 'global', pinned: false }
-	);
-	assert.deepStrictEqual(
-		resolveRoute('gemini-2.5-flash', { backend: 'vertexAI', location: 'europe-west1' }),
-		{ backend: 'vertexAI', location: 'europe-west1', pinned: false }
-	);
-	// Unbekannte 3.x-Modelle (z. B. Previews aus den Einstellungen) greifen über die Heuristik.
-	assert.deepStrictEqual(
-		resolveRoute('gemini-3.1-pro-preview', { backend: 'vertexAI', location: 'europe-west1' }),
-		{ backend: 'vertexAI', location: 'global', pinned: true }
-	);
-	// Präfix-Schreibweisen routen identisch (normalizeModelName).
-	assert.deepStrictEqual(
-		resolveRoute('models/gemini-3.5-flash', { backend: 'vertexAI', location: 'us-central1' }),
-		{ backend: 'vertexAI', location: 'global', pinned: true }
-	);
-	// googleAI kennt keinen Standort: nichts wird gepinnt; leere Konfiguration fällt sauber zurück.
-	assert.deepStrictEqual(
-		resolveRoute('gemini-3.5-flash', { backend: 'googleAI', location: 'us-central1' }),
-		{ backend: 'googleAI', location: 'us-central1', pinned: false }
-	);
-	assert.deepStrictEqual(
-		resolveRoute('gemini-2.5-flash', {}),
-		{ backend: 'googleAI', location: 'us-central1', pinned: false }
-	);
-
 	// fixedLocation: gemeinsame Anzeige-Regel, auch für unbekannte 3.x und Präfix-Formen.
+	// (Das Standort-ROUTING liegt seit dem BYOK-Rückbau vollständig beim Proxy.)
 	assert.strictEqual(fixedLocation('gemini-3-pro-preview'), 'global');
 	assert.strictEqual(fixedLocation('models/gemini-3.5-flash'), 'global');
 	assert.strictEqual(fixedLocation('gemini-2.5-flash'), undefined);
@@ -296,7 +264,7 @@ async function testModelCatalog() {
 	assert.strictEqual(normalizeModelName('gemini-3.5-flash/'), 'gemini-3.5-flash');
 	assert.strictEqual(normalizeModelName('models/'), 'models');
 	assert.strictEqual(normalizeModelName(''), 'gemini-2.5-flash');
-	console.log('✔ Modell-Katalog: Picker-Einträge, Auto-Routing (Gemini 3.x → global), Overrides');
+	console.log('✔ Modell-Katalog: Picker-Einträge, feste Standorte (Anzeige), Namens-Normalisierung');
 }
 
 async function testProxyClient() {
@@ -320,6 +288,19 @@ async function testProxyClient() {
 	assert.strictEqual(res.candidates[0].content.parts[0].text, 'ok');
 	assert.strictEqual(calls[0].url, 'https://proxy.example/v1/models/gemini-3.5-flash:generateContent');
 	assert.strictEqual(calls[0].init.headers.Authorization, 'Bearer id-token-1');
+
+	// Token wird PRO Anfrage geholt (nicht zur Konstruktionszeit eingefroren) –
+	// Agent-Läufe können länger leben als die Token-TTL; der AuthManager erneuert dann.
+	let tokenN = 0;
+	const seenAuth = [];
+	const rotating = new ProxyClient({
+		baseUrl: 'https://proxy.example', model: 'gemini-2.5-flash',
+		getIdToken: async () => `idt-${++tokenN}`,
+		fetchImpl: async (_url, init) => { seenAuth.push(init.headers.Authorization); return { ok: true, status: 200, json: async () => ({}) }; }
+	});
+	await rotating.generateContent({});
+	await rotating.generateContent({});
+	assert.deepStrictEqual(seenAuth, ['Bearer idt-1', 'Bearer idt-2']);
 
 	// Retry bei 429; Erfolg im zweiten Versuch.
 	let attempts = 0;
@@ -366,7 +347,53 @@ async function testProxyClient() {
 	assert.deepStrictEqual(await catalog.listModels(), [{ id: 'gemini-3.5-flash', label: 'G 3.5', location: 'eu' }]);
 	assert.ok((await catalog.ping()).includes('1 Modelle'));
 
-	console.log('✔ Proxy-Client: URLs/Bearer, Retry (429), 401-Hinweis, SSE-Streaming, Katalog/Ping');
+	// Verbrauchsabfrage: GET /v1/usage mit Bearer.
+	const usage = mk(async (url, init) => {
+		assert.ok(url.endsWith('/v1/usage'));
+		assert.strictEqual(init.headers.Authorization, 'Bearer id-token-1');
+		return { ok: true, status: 200, json: async () => ({ month: '2026-07', totalTokens: 42, limit: 1000 }) };
+	});
+	assert.strictEqual((await usage.getUsage()).totalTokens, 42);
+
+	// 404 bei /v1/usage heißt "alter Proxy/Metering aus" – nicht "Modell nicht im Angebot".
+	const oldProxy = mk(async () => ({ ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'Unbekannter Endpunkt.' }) }));
+	await assert.rejects(oldProxy.getUsage(), (err) => err.status === 404 && /Verbrauchsdaten/.test(err.hint));
+
+	// Quota-429 (reason 'quota'): KEIN Retry – Warten hilft nicht bis Monatsende.
+	let quotaTries = 0;
+	const quota = mk(async () => {
+		quotaTries++;
+		return {
+			ok: false, status: 429, statusText: 'Too Many Requests',
+			json: async () => ({ error: 'Monatskontingent erschöpft (1000 von 1000 Tokens im Monat 2026-07).', reason: 'quota' })
+		};
+	});
+	await assert.rejects(quota.generateContent({}), (err) =>
+		err.status === 429 && err.retryable === false && /Monatskontingent/.test(err.hint));
+	assert.strictEqual(quotaTries, 1, 'Quota-429 darf nicht wiederholt werden');
+
+	// Anzeigetext der Verbrauchsabfrage (deutsches Zahlenformat, Monatsname, Limit-Varianten).
+	const text = formatUsage({ month: '2026-07', plan: 'free', limit: 2000000, totalTokens: 12345, requests: 42 });
+	assert.ok(text.includes('Juli 2026') && text.includes('12.345') && text.includes('2.000.000') && text.includes('1 %'), text);
+	const unlimited = formatUsage({ month: '2026-07', plan: 'pro', limit: 0, totalTokens: 5, requests: 1 });
+	assert.ok(unlimited.includes('kein Limit') && unlimited.includes('pro'), unlimited);
+
+	// Harter Anmelde-/Erneuerungsfehler aus getIdToken: KEIN Retry, keine Verschleierung
+	// als „Netzwerkfehler“ – die ursprüngliche Meldung (Anmelde-Hinweis) bleibt erhalten.
+	let authTokenCalls = 0;
+	let fetchReached = false;
+	const authFail = new ProxyClient({
+		baseUrl: 'https://proxy.example/', model: 'gemini-2.5-flash', retryDelayMs: 1,
+		getIdToken: async () => { authTokenCalls++; throw new Error('Nicht angemeldet. Kommando „Agent: Mit Google anmelden“ ausführen.'); },
+		fetchImpl: async () => { fetchReached = true; throw new Error('fetch darf nie erreicht werden'); }
+	});
+	await assert.rejects(authFail.generateContent({}), (err) => /Nicht angemeldet/.test(err.message) && !/Netzwerkfehler/.test(err.message));
+	assert.strictEqual(authTokenCalls, 1, 'Anmeldefehler darf nicht wiederholt werden');
+	assert.strictEqual(fetchReached, false, 'ohne Token darf keine Anfrage rausgehen');
+	// Auch der Streaming-Pfad reicht den Anmeldefehler unverfälscht durch.
+	await assert.rejects(authFail.generateContentStream({}, undefined, () => { }), (err) => /Nicht angemeldet/.test(err.message));
+
+	console.log('✔ Proxy-Client: URLs/Bearer, Retry (429), 401-Hinweis, SSE, Katalog/Ping, Usage & Quota-429, Anmeldefehler ohne Retry');
 }
 
 async function testFirebaseAuth() {
@@ -383,37 +410,32 @@ async function testFirebaseAuth() {
 	assert.strictEqual(decodeJwtPayload(fakeIdJwt).email, 'jwt@example.com');
 	assert.strictEqual(decodeJwtPayload('kaputt'), null);
 
-	// Voller Anmelde-Flow: echter Loopback-Server, Browser und Netz simuliert.
+	// Voller Anmelde-Flow: echter Loopback-Server, Browser und Auth-Relay simuliert.
+	// Der Client spricht NIE Google direkt – nur das Relay des Proxys (kein Secret, kein Key).
 	let sentChallenge = '';
 	const fakeFetch = async (url, init) => {
-		if (url.startsWith('https://oauth2.googleapis.com/token')) {
-			const params = new URLSearchParams(init.body);
-			assert.strictEqual(params.get('code'), 'test-code');
-			assert.strictEqual(params.get('grant_type'), 'authorization_code');
+		if (url === 'https://proxy.example/v1/auth/exchange') {
+			const body = JSON.parse(init.body);
+			assert.strictEqual(body.code, 'test-code');
+			assert.ok(body.redirectUri.startsWith('http://127.0.0.1:'), 'Loopback-Redirect muss ans Relay gehen');
 			assert.strictEqual(
-				crypto.createHash('sha256').update(params.get('code_verifier')).digest().toString('base64url'),
+				crypto.createHash('sha256').update(body.codeVerifier).digest().toString('base64url'),
 				sentChallenge,
 				'PKCE-Verifier muss zur Challenge aus der Auth-URL passen'
 			);
-			return { ok: true, status: 200, json: async () => ({ id_token: 'google-id-token' }) };
-		}
-		if (url.startsWith('https://identitytoolkit.googleapis.com/')) {
-			assert.ok(url.includes('key=web-api-key'), 'API-Key muss an signInWithIdp gehen');
-			const body = JSON.parse(init.body);
-			assert.ok(body.postBody.includes('id_token=google-id-token'));
-			assert.ok(body.postBody.includes('providerId=google.com'));
 			return {
 				ok: true, status: 200,
-				json: async () => ({ idToken: 'firebase-id-token', refreshToken: 'refresh-1', email: 'nutzer@example.com', expiresIn: '3600' })
+				json: async () => ({ idToken: 'firebase-id-token', refreshToken: 'refresh-1', email: 'nutzer@example.com', expiresInSec: 3600 })
 			};
 		}
 		throw new Error(`Unerwarteter Netzaufruf: ${url}`);
 	};
 	const result = await signInWithGoogle({
-		clientId: 'cid', clientSecret: 'csec', apiKey: 'web-api-key', fetchImpl: fakeFetch,
+		clientId: 'cid', proxyUrl: 'https://proxy.example', fetchImpl: fakeFetch,
 		openBrowser: async (authUrl) => {
 			const u = new URL(authUrl);
 			assert.strictEqual(u.searchParams.get('code_challenge_method'), 'S256');
+			assert.ok(!authUrl.includes('secret'), 'Auth-URL trägt nur Öffentliches');
 			sentChallenge = u.searchParams.get('code_challenge');
 			const redirect = u.searchParams.get('redirect_uri');
 			assert.ok(redirect.startsWith('http://127.0.0.1:'), 'Redirect muss auf den Loopback zeigen');
@@ -430,7 +452,7 @@ async function testFirebaseAuth() {
 
 	// State-Mismatch (CSRF/fremder Redirect) bricht den Flow ab.
 	await assert.rejects(signInWithGoogle({
-		clientId: 'cid', clientSecret: 'csec', apiKey: 'k', fetchImpl: fakeFetch,
+		clientId: 'cid', proxyUrl: 'https://proxy.example', fetchImpl: fakeFetch,
 		openBrowser: async (authUrl) => {
 			const redirect = new URL(authUrl).searchParams.get('redirect_uri');
 			const res = await fetch(`${redirect}?code=test-code&state=falsch`);
@@ -441,21 +463,21 @@ async function testFirebaseAuth() {
 	// Abbruch über AbortSignal: Flow endet sofort mit „abgebrochen“ und räumt auf.
 	const abortController = new AbortController();
 	await assert.rejects(signInWithGoogle({
-		clientId: 'cid', clientSecret: 'csec', apiKey: 'k', fetchImpl: fakeFetch,
+		clientId: 'cid', proxyUrl: 'https://proxy.example', fetchImpl: fakeFetch,
 		signal: abortController.signal,
 		openBrowser: async () => { abortController.abort(); }
 	}), /abgebrochen/i);
 
-	// Ohne Web-API-Key wird die Erneuerung gar nicht erst versucht.
-	await assert.rejects(refreshIdToken({ apiKey: '', refreshToken: 'r' }), /Web-API-Key/);
+	// Ohne Proxy-URL wird die Erneuerung gar nicht erst versucht.
+	await assert.rejects(refreshIdToken({ proxyUrl: '', refreshToken: 'r' }), /Proxy-URL/);
 
-	// Token-Erneuerung inkl. Rotation des Refresh-Tokens.
+	// Token-Erneuerung über das Relay inkl. Rotation des Refresh-Tokens.
 	const refreshed = await refreshIdToken({
-		apiKey: 'k', refreshToken: 'r-alt',
+		proxyUrl: 'https://proxy.example', refreshToken: 'r-alt',
 		fetchImpl: async (url, init) => {
-			assert.ok(url.startsWith('https://securetoken.googleapis.com/v1/token'));
-			assert.strictEqual(new URLSearchParams(init.body).get('refresh_token'), 'r-alt');
-			return { ok: true, status: 200, json: async () => ({ id_token: 'id-neu', refresh_token: 'r-neu', expires_in: '3600' }) };
+			assert.strictEqual(url, 'https://proxy.example/v1/auth/refresh');
+			assert.strictEqual(JSON.parse(init.body).refreshToken, 'r-alt');
+			return { ok: true, status: 200, json: async () => ({ idToken: 'id-neu', refreshToken: 'r-neu', expiresInSec: 3600 }) };
 		}
 	});
 	assert.deepStrictEqual(
@@ -463,7 +485,13 @@ async function testFirebaseAuth() {
 		{ idToken: 'id-neu', refreshToken: 'r-neu' }
 	);
 
-	console.log('✔ Firebase-Auth: PKCE, Loopback-Flow, state-Prüfung, signInWithIdp, Refresh-Rotation');
+	// Relay-Fehler ({error}) wird zur verständlichen Meldung.
+	await assert.rejects(refreshIdToken({
+		proxyUrl: 'https://proxy.example', refreshToken: 'r-abgelaufen',
+		fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({ error: 'Token-Erneuerung fehlgeschlagen: TOKEN_EXPIRED' }) })
+	}), /TOKEN_EXPIRED/);
+
+	console.log('✔ Firebase-Auth: PKCE, Loopback-Flow, state-Prüfung, Auth-Relay (Exchange/Refresh ohne Client-Geheimnisse)');
 }
 
 async function testAuthManager() {
@@ -475,33 +503,35 @@ async function testAuthManager() {
 	};
 	let tNow = Date.now();
 	let refreshCalls = 0;
-	const fetchImpl = async () => {
+	const fetchImpl = async (url) => {
 		refreshCalls++;
-		return { ok: true, status: 200, json: async () => ({ id_token: `id-${refreshCalls}`, refresh_token: `r-${refreshCalls}`, expires_in: '3600' }) };
+		assert.ok(String(url).endsWith('/v1/auth/refresh'), 'Erneuerung muss über das Auth-Relay laufen');
+		return { ok: true, status: 200, json: async () => ({ idToken: `id-${refreshCalls}`, refreshToken: `r-${refreshCalls}`, expiresInSec: 3600 }) };
 	};
+	const PROXY = 'https://proxy.example';
 
 	// Abgemeldet: Status falsch, Token-Abruf wirft verständlich.
 	const anon = new AuthManager({ secrets, now: () => tNow, fetchImpl });
 	assert.strictEqual(await anon.isSignedIn(), false);
-	await assert.rejects(anon.getIdToken('k'), /angemeldet/i);
+	await assert.rejects(anon.getIdToken(PROXY), /angemeldet/i);
 
 	// Angemeldeter Zustand (Refresh-Token liegt in der SecretStorage).
 	await secrets.store(AUTH_SECRET_KEY, JSON.stringify({ refreshToken: 'r-0', email: 'e@example.com' }));
 	const mgr = new AuthManager({ secrets, now: () => tNow, fetchImpl });
 	assert.strictEqual(await mgr.isSignedIn(), true);
 	assert.strictEqual(await mgr.email(), 'e@example.com');
-	assert.strictEqual(await mgr.getIdToken('k'), 'id-1');
-	assert.strictEqual(await mgr.getIdToken('k'), 'id-1', 'zweiter Abruf muss aus dem Cache kommen');
+	assert.strictEqual(await mgr.getIdToken(PROXY), 'id-1');
+	assert.strictEqual(await mgr.getIdToken(PROXY), 'id-1', 'zweiter Abruf muss aus dem Cache kommen');
 	assert.strictEqual(refreshCalls, 1);
 	assert.ok(store.get(AUTH_SECRET_KEY).includes('r-1'), 'rotierter Refresh-Token muss persistiert sein');
 
 	// Nach Ablauf wird erneuert.
 	tNow += 3600 * 1000 + 1;
-	assert.strictEqual(await mgr.getIdToken('k'), 'id-2');
+	assert.strictEqual(await mgr.getIdToken(PROXY), 'id-2');
 	assert.strictEqual(refreshCalls, 2);
 
-	// Cache ist pro API-Key: anderer Key (= anderes Projekt) erzwingt neue Erneuerung.
-	assert.strictEqual(await mgr.getIdToken('anderer-key'), 'id-3');
+	// Cache ist pro Proxy-URL: anderer Dienst erzwingt neue Erneuerung.
+	assert.strictEqual(await mgr.getIdToken('https://anderer.example'), 'id-3');
 	assert.strictEqual(refreshCalls, 3);
 
 	// Abmelden räumt alles weg.
@@ -517,10 +547,10 @@ async function testAuthManager() {
 		secrets, now: () => tNow,
 		fetchImpl: async () => {
 			await gate;
-			return { ok: true, status: 200, json: async () => ({ id_token: 'spät', refresh_token: 'r-rotiert', expires_in: '3600' }) };
+			return { ok: true, status: 200, json: async () => ({ idToken: 'spät', refreshToken: 'r-rotiert', expiresInSec: 3600 }) };
 		}
 	});
-	const pending = racy.getIdToken('k');
+	const pending = racy.getIdToken(PROXY);
 	pending.catch(() => { }); // Ablehnung kommt erst nach dem signOut
 	await new Promise((resolve) => setImmediate(resolve)); // Erneuerung ist jetzt in flight
 	await racy.signOut();
@@ -563,7 +593,7 @@ async function testAuthManager() {
 	windowB.invalidate();
 	assert.strictEqual(await windowB.isSignedIn(), false, 'nach invalidate zählt der echte Speicherstand');
 
-	console.log('✔ Auth-Verwaltung: Cache pro API-Key, Ablauf-Erneuerung, Rotation, signOut-Race, Keyring-Retry, invalidate');
+	console.log('✔ Auth-Verwaltung: Cache pro Proxy-URL, Ablauf-Erneuerung, Rotation, signOut-Race, Keyring-Retry, invalidate');
 }
 
 async function testActivityIndex() {
@@ -739,13 +769,15 @@ async function testSseStreaming() {
 	assert.strictEqual(merged.candidates[0].content.parts[1].functionCall.name, 'f');
 	assert.strictEqual(merged.candidates[0].finishReason, 'STOP');
 
-	// Voller Streaming-Aufruf gegen ein gemocktes fetch (SSE-Body als async iterable).
+	// Voller Streaming-Aufruf gegen ein gemocktes fetch (SSE-Body als async iterable) –
+	// seit dem BYOK-Rückbau über den ProxyClient, den einzigen Modell-Transport.
 	const sse = [
 		'data: {"candidates":[{"content":{"parts":[{"text":"const a"}]}}]}\r\n\r\n',
 		'data: {"candidates":[{"content":{"parts":[{"text":" = 1;"}]},"finishReason":"STOP"}]}\r\n\r\n'
 	];
-	const client = new FirebaseAiLogicClient({
-		apiKey: 'k', projectId: 'p', model: 'gemini-2.5-flash',
+	const client = new ProxyClient({
+		baseUrl: 'https://proxy.example', model: 'gemini-2.5-flash',
+		getIdToken: async () => 'idt',
 		fetchImpl: async () => ({
 			ok: true,
 			body: (async function* () {
@@ -759,7 +791,7 @@ async function testSseStreaming() {
 	assert.strictEqual(merged.candidates[0].finishReason, 'STOP');
 	assert.strictEqual(response.candidates[0].content.parts[0].text, 'const a = 1;');
 
-	console.log('✔ SSE-Streaming: Parser (zerteilte Chunks), Chunk-Merge, generateContentStream');
+	console.log('✔ SSE-Streaming: Parser (zerteilte Chunks), Chunk-Merge, generateContentStream (ProxyClient)');
 }
 
 async function testLineDiff() {

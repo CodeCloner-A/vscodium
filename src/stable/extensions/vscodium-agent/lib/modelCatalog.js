@@ -1,12 +1,11 @@
 /*---------------------------------------------------------------------------------------------
- * VSCodium Agent – Modell-Katalog mit automatischem Standort-Routing.
+ * VSCodium Agent – Lokaler Modell-Katalog (Offline-Fallback des Pickers).
  *
- * Der Nutzer wählt nur das Modell; den Standort löst die Extension auf (das Backend bestimmt
- * weiterhin die Einstellung `firebase.backend`). Hintergrund (verifiziert 07/2026): Firebase
- * AI Logic erlaubt für alle Gemini-3.x-Modelle über das vertexAI-Backend ausschließlich
- * location='global' – regionale Standorte gibt es für 3.x nur über Vertex AI direkt (kommt
- * mit dem Proxy-Backend, Phase S der Roadmap). Die 2.5-Familie bleibt regional pinnbar,
- * dort gilt weiter die Location-Einstellung.
+ * Das maßgebliche Angebot liefert der Agent-Proxy (GET /v1/models, serverseitige Allowlist
+ * samt Standort-Routing in agent-proxy/lib/catalog.js). Dieser lokale Katalog springt nur
+ * ein, wenn der Proxy nicht erreichbar ist oder niemand angemeldet ist – damit der Picker
+ * nie leer dasteht. Das frühere Client-Routing (resolveRoute) fiel mit dem BYOK-Rückbau
+ * (v0.9.0) weg.
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
@@ -53,26 +52,4 @@ function pickerModels() {
 	return MODEL_CATALOG.map(m => ({ id: m.id, label: m.label, region: fixedLocation(m.id) }));
 }
 
-/**
- * Löst Backend und Standort für ein Modell auf.
- *
- * @param {string} model Modellname (roh, wird normalisiert)
- * @param {{ backend?: string, location?: string }} cfg Werte aus den Einstellungen
- * @returns {{ backend: string, location: string, pinned: boolean }}
- *          `pinned` = die Location-Einstellung wurde modellbedingt übersteuert.
- */
-function resolveRoute(model, cfg) {
-	const backend = cfg && cfg.backend === 'vertexAI' ? 'vertexAI' : 'googleAI';
-	const location = (cfg && cfg.location) || 'us-central1';
-	// Das googleAI-Backend (Gemini Developer API) kennt keinen Standort.
-	if (backend !== 'vertexAI') {
-		return { backend, location, pinned: false };
-	}
-	const allowed = fixedVertexLocations(model);
-	if (allowed && !allowed.includes(location)) {
-		return { backend, location: allowed[0], pinned: true };
-	}
-	return { backend, location, pinned: false };
-}
-
-module.exports = { MODEL_CATALOG, pickerModels, resolveRoute, fixedLocation };
+module.exports = { MODEL_CATALOG, pickerModels, fixedLocation };

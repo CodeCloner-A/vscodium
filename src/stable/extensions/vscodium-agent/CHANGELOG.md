@@ -4,6 +4,28 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.9.0] – 2026-07-13
+
+### Entfernt
+- **BYOK-Rückbau (Phase S, Roadmap-Punkt 10):** Der direkte API-Key-Pfad zu Firebase AI Logic ist komplett weg — Kommandos „Firebase API-Key setzen/löschen“, die Einstellungen `firebase.projectId`/`appId`/`backend`/`location` und `auth.googleClientId`/`googleClientSecret` sowie der `FirebaseAiLogicClient` (übrig bleiben die geteilten Gemini-Format-Helfer). Ein noch gespeicherter API-Key wird beim ersten Start gelöscht. Das Standort-Routing (`resolveRoute`) entfällt clientseitig — es liegt vollständig beim Proxy.
+
+### Geändert
+- **Anmeldung und Token-Erneuerung laufen über das Auth-Relay des Proxys** (`POST /v1/auth/exchange` bzw. `/v1/auth/refresh`, Proxy v0.3.0): Die Extension trägt keinerlei Geheimnisse mehr — OAuth-Client-Secret und Firebase-Web-API-Key leben ausschließlich im Cloud-Run-Proxy (Secret Manager). Im Client verbleibt nur die öffentliche OAuth-Client-ID (fest eingebaut, `lib/saasConfig.js`); der Browser-Flow (PKCE + Loopback + state-Prüfung) bleibt unverändert. Bestehende Anmeldungen überleben das Update (gleicher Refresh-Token, neuer Erneuerungs-Weg).
+- Chat, Inline-Edit und „In Datei übernehmen“ setzen jetzt die Anmeldung voraus; das Setup-Panel bietet direkt „Mit Google anmelden“ statt der API-Key-Eingabe. „Agent: Verbindung testen“ prüft den Agent-Proxy.
+
+### Sicherheit
+- Kein Schlüsselmaterial mehr im ausgelieferten Client oder in den Einstellungen; empfohlen: den Web-API-Key in der GCP-Konsole zusätzlich auf die Identity-Toolkit-API beschränken (siehe `docs/agent-proxy.md`).
+- Die (unauthentifizierten) Auth-Endpunkte des Proxys haben einen **eigenen** Rate-Limit-Eimer (getrennt vom Modell-Verkehr) und prüfen das per-IP-Limit zuerst — ein Anmelde-Flood aus einer IP kann den bezahlten Modell-Verkehr nicht mehr über den geteilten Gesamtdeckel aussperren (aus dem Security-Review).
+- Ein harter Anmelde-/Erneuerungsfehler (Refresh-Token abgelaufen/widerrufen) wird im Client nicht mehr als retrybarer Netzwerkfehler behandelt: kein dreifacher Wiederholversuch, der eigentliche Anmelde-Hinweis bleibt sichtbar (aus dem Security-Review).
+
+## [0.8.0] – 2026-07-12
+
+### Hinzugefügt
+- **Verbrauchsanzeige (Metering, Phase S):** Kommando „Agent: Verbrauch anzeigen“ (auch im Konto-Menü der Chat-Statusleiste) zeigt den Monatsverbrauch des angemeldeten Nutzers — Tokens, Limit, Prozent, Anfragen, Tarif (`GET /v1/usage` des Proxys). Serverseitig zählt der Proxy jetzt pro Nutzer und Monat in Firestore mit und setzt harte Monats-Quoten durch (Proxy v0.2.0, siehe `docs/agent-proxy.md`).
+
+### Geändert
+- Ein erschöpftes Monatskontingent (429 mit `reason: quota`) wird nicht mehr wie ein Rate-Limit behandelt: kein automatischer Retry (Warten hilft bis Monatsende nicht), stattdessen ein klarer Hinweis auf die Verbrauchsanzeige.
+
 ## [0.7.0] – 2026-07-12
 
 ### Hinzugefügt

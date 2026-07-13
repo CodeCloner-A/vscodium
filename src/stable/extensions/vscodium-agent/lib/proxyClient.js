@@ -1,10 +1,10 @@
 /*---------------------------------------------------------------------------------------------
  * VSCodium Agent – Client für den Agent-Proxy (Cloud Run, Phase S).
  *
- * Gleiches Interface wie FirebaseAiLogicClient (generateContent, generateContentStream,
- * ping, model/projectId), aber: Authentifizierung per Firebase-ID-Token (Bearer) statt
- * API-Key, und Standort-Routing liegt beim Server. `getIdToken` liefert pro Anfrage ein
- * frisches Token (Auto-Erneuerung übernimmt der AuthManager).
+ * Seit dem BYOK-Rückbau (v0.9.0) der einzige Modell-Transport: Authentifizierung per
+ * Firebase-ID-Token (Bearer), Standort-Routing und Modell-Allowlist liegen beim Server.
+ * `getIdToken` liefert pro Anfrage ein frisches Token (Auto-Erneuerung übernimmt der
+ * AuthManager).
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
@@ -21,6 +21,23 @@ class ProxyError extends Error {
 		this.hint = hint;
 		this.retryable = Boolean(retryable);
 	}
+}
+
+/** Verbrauchs-Snapshot des Proxys (GET /v1/usage) als deutscher Anzeigetext. */
+function formatUsage(usage) {
+	const de = (n) => Number(n || 0).toLocaleString('de-DE');
+	let monthLabel = String(usage.month || '');
+	const parsed = /^(\d{4})-(\d{2})$/.exec(monthLabel);
+	if (parsed) {
+		monthLabel = new Date(Date.UTC(Number(parsed[1]), Number(parsed[2]) - 1, 1))
+			.toLocaleDateString('de-DE', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+	}
+	const suffix = `${de(usage.requests)} Anfragen · Tarif ${usage.plan || 'free'}`;
+	if (!usage.limit || usage.limit <= 0) {
+		return `Verbrauch im ${monthLabel}: ${de(usage.totalTokens)} Tokens (kein Limit) · ${suffix}`;
+	}
+	const percent = Math.round((Number(usage.totalTokens) || 0) / usage.limit * 100);
+	return `Verbrauch im ${monthLabel}: ${de(usage.totalTokens)} von ${de(usage.limit)} Tokens (${percent} %) · ${suffix}`;
 }
 
 function sleep(ms, signal) {
@@ -66,11 +83,16 @@ class ProxyClient {
 		let lastError;
 		for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 			try {
+				// Token/Erneuerung außerhalb des Netzwerk-try beschaffen: Ein harter
+				// Anmelde-/Erneuerungsfehler (Refresh-Token abgelaufen/widerrufen) ist KEIN
+				// retrybarer Netzwerkfehler – sonst würde er 3× wiederholt und sein
+				// Anmelde-Hinweis ginge hinter „Netzwerkfehler“ verloren.
+				const headers = await this._headers();
 				let response;
 				try {
 					response = await this.fetchImpl(this.url('generateContent'), {
 						method: 'POST',
-						headers: await this._headers(),
+						headers,
 						body: JSON.stringify(request),
 						signal
 					});
@@ -97,11 +119,14 @@ class ProxyClient {
 	 * onText je Fragment, am Ende die zusammengeführte Antwort, bewusst ohne Retry.
 	 */
 	async generateContentStream(request, signal, onText) {
+		// Token/Erneuerung vor dem Netzwerk-try beschaffen (s. generateContent): ein
+		// Anmelde-/Erneuerungsfehler soll nicht als „Netzwerkfehler“ verschleiert werden.
+		const headers = await this._headers();
 		let response;
 		try {
 			response = await this.fetchImpl(this.url('streamGenerateContent'), {
 				method: 'POST',
-				headers: await this._headers(),
+				headers,
 				body: JSON.stringify(request),
 				signal
 			});
@@ -151,19 +176,44 @@ class ProxyClient {
 		return `${models.length} Modelle im Angebot`;
 	}
 
+	/** Monatsverbrauch + Limit des angemeldeten Nutzers (GET /v1/usage). */
+	async getUsage(signal) {
+		const response = await this.fetchImpl(`${this.baseUrl}/v1/usage`, {
+			headers: { 'Authorization': `Bearer ${await this.getIdToken()}` },
+			signal
+		});
+		if (!response.ok) {
+			const err = await this._errorFromResponse(response);
+			// Der generische 404-Hinweis ("Modell nicht im Angebot") passt hier nicht:
+			// 404 heißt bei /v1/usage alter Proxy oder abgeschaltetes Metering.
+			if (err.status === 404) {
+				err.hint = 'Der Proxy bietet keine Verbrauchsdaten an (ältere Proxy-Version oder Metering deaktiviert).';
+			}
+			throw err;
+		}
+		return response.json();
+	}
+
 	async _errorFromResponse(response) {
 		if (!response) { return new ProxyError('Keine Antwort vom Agent-Proxy.'); }
 		let message = '';
+		let reason;
 		try {
 			const json = await response.json();
 			if (json && json.error) {
 				message = typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
 				if (json.detail) { message += ` (${json.detail})`; }
 			}
+			if (json) { reason = json.reason; }
 		} catch (_e) { /* kein JSON-Körper */ }
+		// reason 'quota' = Monatskontingent erschöpft: Warten hilft nicht, also kein Retry –
+		// anders als beim Rate-Limit-429 (kurzes Fenster).
+		const quota = response.status === 429 && reason === 'quota';
 		let hint;
 		if (response.status === 401) {
 			hint = 'Anmeldung fehlt oder ist abgelaufen – Kommando „Agent: Mit Google anmelden“ ausführen.';
+		} else if (quota) {
+			hint = 'Monatskontingent erschöpft – Verbrauch über das Konto-Menü („Verbrauch anzeigen“) prüfen.';
 		} else if (response.status === 429) {
 			hint = 'Anfrage-Limit erreicht – kurz warten und erneut versuchen.';
 		} else if (response.status === 404) {
@@ -172,9 +222,9 @@ class ProxyClient {
 		return new ProxyError(`Agent-Proxy [${response.status}]: ${message || response.statusText || 'Fehler'}`, {
 			status: response.status,
 			hint,
-			retryable: response.status === 429 || response.status >= 500
+			retryable: (response.status === 429 && !quota) || response.status >= 500
 		});
 	}
 }
 
-module.exports = { ProxyClient, ProxyError };
+module.exports = { ProxyClient, ProxyError, formatUsage };

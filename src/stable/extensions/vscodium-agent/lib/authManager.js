@@ -24,7 +24,7 @@ class AuthManager {
 		this.log = options.log || { info() { }, error() { } };
 		this.now = options.now || Date.now;
 		this.fetchImpl = options.fetchImpl;
-		/** @type {{ idToken: string, expiresAt: number, apiKey: string } | null} */
+		/** @type {{ idToken: string, expiresAt: number, proxyUrl: string } | null} */
 		this._cached = null;
 		/** @type {{ refreshToken: string, email: string } | null | undefined} undefined = noch nicht geladen */
 		this._stored = undefined;
@@ -76,13 +76,13 @@ class AuthManager {
 	}
 
 	/** Interaktive Google-Anmeldung; speichert Refresh-Token + E-Mail. */
-	async signIn({ clientId, clientSecret, apiKey, openBrowser, timeoutMs, signal }) {
+	async signIn({ clientId, proxyUrl, openBrowser, timeoutMs, signal }) {
 		const result = await signInWithGoogle({
-			clientId, clientSecret, apiKey, openBrowser, timeoutMs, signal,
+			clientId, proxyUrl, openBrowser, timeoutMs, signal,
 			fetchImpl: this.fetchImpl
 		});
 		await this._persist(result.refreshToken, result.email);
-		this._cached = { idToken: result.idToken, expiresAt: result.expiresAt, apiKey };
+		this._cached = { idToken: result.idToken, expiresAt: result.expiresAt, proxyUrl };
 		this.log.info(`Angemeldet als ${result.email || '(ohne E-Mail)'}`);
 		return { email: result.email };
 	}
@@ -100,16 +100,16 @@ class AuthManager {
 	 * Gültiges Firebase-ID-Token liefern; erneuert automatisch (Refresh-Token-Rotation
 	 * wird persistiert). Wirft, wenn niemand angemeldet ist.
 	 */
-	async getIdToken(apiKey) {
-		// Cache gilt nur für denselben API-Key (Projektwechsel invalidiert ihn).
-		if (this._cached && this._cached.apiKey === apiKey
+	async getIdToken(proxyUrl) {
+		// Cache gilt nur für denselben Proxy (Dienst-Wechsel invalidiert ihn).
+		if (this._cached && this._cached.proxyUrl === proxyUrl
 			&& this.now() < this._cached.expiresAt - EXPIRY_MARGIN_MS) {
 			return this._cached.idToken;
 		}
 		const stored = await this._load();
 		if (!stored) { throw new Error('Nicht angemeldet. Kommando „Agent: Mit Google anmelden“ ausführen.'); }
 		const result = await refreshIdToken({
-			apiKey,
+			proxyUrl,
 			refreshToken: stored.refreshToken,
 			fetchImpl: this.fetchImpl
 		});
@@ -121,7 +121,7 @@ class AuthManager {
 		if (result.refreshToken !== stored.refreshToken) {
 			await this._persist(result.refreshToken, stored.email);
 		}
-		this._cached = { idToken: result.idToken, expiresAt: result.expiresAt, apiKey };
+		this._cached = { idToken: result.idToken, expiresAt: result.expiresAt, proxyUrl };
 		return result.idToken;
 	}
 }

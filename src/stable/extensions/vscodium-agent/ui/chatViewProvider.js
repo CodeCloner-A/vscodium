@@ -7,16 +7,15 @@
 
 const vscode = require('vscode');
 const crypto = require('crypto');
-const { FirebaseAiLogicClient, extractText, extractBlockReason, normalizeModelName } = require('../lib/firebaseClient');
+const { extractText, extractBlockReason, normalizeModelName } = require('../lib/firebaseClient');
 const { AgentRun } = require('../lib/agentController');
 const { WorkspaceHost } = require('../lib/workspaceHost');
 const { buildSystemPrompt } = require('../lib/prompts');
 const { NOOP_LOGGER } = require('../lib/logger');
 const { buildApplyRequest, extractCode, APPLY_MAX_LINES } = require('../lib/inlineEdit');
-const { pickerModels, resolveRoute, fixedLocation } = require('../lib/modelCatalog');
-const { ProxyClient } = require('../lib/proxyClient');
+const { pickerModels, fixedLocation } = require('../lib/modelCatalog');
+const { ProxyClient, ProxyError } = require('../lib/proxyClient');
 
-const SECRET_KEY = 'vscodiumAgent.firebaseApiKey';
 const STATE_KEY = 'vscodiumAgent.sessions.v1';
 const CAPTURE_KEY = 'vscodiumAgent.lastCaptureAt';
 
@@ -168,10 +167,6 @@ class ChatViewProvider {
 	config() {
 		const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
 		return {
-			projectId: cfg.get('firebase.projectId', 'controlling-man'),
-			appId: cfg.get('firebase.appId', ''),
-			backend: cfg.get('firebase.backend', 'googleAI'),
-			location: cfg.get('firebase.location', 'us-central1'),
 			proxyUrl: String(cfg.get('proxy.url', '')).replace(/\/+$/, ''),
 			model: cfg.get('model', 'gemini-2.5-flash'),
 			inlineEditModel: cfg.get('inlineEdit.model', 'gemini-2.5-flash'),
@@ -183,38 +178,26 @@ class ChatViewProvider {
 		};
 	}
 
-	async getApiKey() {
-		return this.context.secrets.get(SECRET_KEY);
-	}
-
 	/** @param {string} [modelOverride]  z. B. das Inline-Edit-Modell. */
 	async buildClient(modelOverride) {
 		const cfg = this.config();
-		const apiKey = await this.getApiKey();
 		const model = modelOverride || cfg.model;
-		// SaaS-Pfad (Phase S): Angemeldete sprechen den Proxy – Auth, Allowlist und
-		// Standort-Routing liegen dort serverseitig. Der API-Key-Pfad bleibt der
-		// Übergang für BYOK, bis der Rückbau kommt.
-		if (this.auth && cfg.proxyUrl && await this.auth.isSignedIn()) {
-			const auth = this.auth;
-			return new ProxyClient({
-				baseUrl: cfg.proxyUrl,
-				model,
-				getIdToken: () => auth.getIdToken(apiKey)
+		// SaaS-Pfad (seit v0.9.0 der einzige): Der Proxy prüft die Anmeldung, hält die
+		// Modell-Allowlist und routet Standorte serverseitig. Zugangsdaten hat der
+		// Client keine – nur das ID-Token des angemeldeten Kontos.
+		if (!cfg.proxyUrl) {
+			throw new ProxyError('Keine Proxy-URL konfiguriert (Einstellung vscodiumAgent.proxy.url).');
+		}
+		if (!this.auth || !await this.auth.isSignedIn()) {
+			throw new ProxyError('Nicht angemeldet.', {
+				hint: 'Kommando „Agent: Mit Google anmelden“ ausführen (oder in der Chat-Statusleiste anmelden).'
 			});
 		}
-		// Auto-Routing: Modelle mit festem Standort übersteuern die Location-Einstellung.
-		const route = resolveRoute(model, cfg);
-		if (route.pinned) {
-			this.log.info(`Standort automatisch gesetzt: ${route.location} (Modell ${model} erlaubt "${cfg.location}" nicht)`);
-		}
-		return new FirebaseAiLogicClient({
-			apiKey,
-			projectId: cfg.projectId,
-			appId: cfg.appId,
-			backend: route.backend,
-			location: route.location,
-			model
+		const auth = this.auth;
+		return new ProxyClient({
+			baseUrl: cfg.proxyUrl,
+			model,
+			getIdToken: () => auth.getIdToken(cfg.proxyUrl)
 		});
 	}
 
@@ -232,7 +215,6 @@ class ChatViewProvider {
 		}
 		try {
 			const client = await this.buildClient();
-			if (client.kind !== 'proxy') { return null; }
 			// Hartes Timeout: Ein hängender Proxy darf das Chat-Panel-Init nicht blockieren.
 			const list = await client.listModels(AbortSignal.timeout(5000));
 			const models = list.map(m => ({ id: m.id, label: m.label || m.id, region: m.location }));
@@ -356,7 +338,8 @@ class ChatViewProvider {
 			case 'authClick': {
 				if (this.auth && await this.auth.isSignedIn()) {
 					const choice = await vscode.window.showQuickPick(
-						[{ label: '$(plug) Proxy-Verbindung testen', action: 'vscodiumAgent.testProxy' },
+						[{ label: '$(graph) Verbrauch anzeigen', action: 'vscodiumAgent.showUsage' },
+						{ label: '$(plug) Proxy-Verbindung testen', action: 'vscodiumAgent.testProxy' },
 						{ label: '$(sign-out) Abmelden', action: 'vscodiumAgent.signOut' }],
 						{ title: `Angemeldet als ${await this.auth.email()}` }
 					);
@@ -366,15 +349,11 @@ class ChatViewProvider {
 				}
 				break;
 			}
-			case 'setApiKey':
-				void vscode.commands.executeCommand('vscodiumAgent.setApiKey');
-				break;
 		}
 	}
 
 	async _sendInit() {
 		const cfg = this.config();
-		const apiKey = await this.getApiKey();
 		const auth = this.auth
 			? { signedIn: await this.auth.isSignedIn(), email: await this.auth.email() }
 			: undefined;
@@ -396,8 +375,8 @@ class ChatViewProvider {
 		this._post({
 			type: 'init',
 			state: {
-				configured: Boolean(apiKey),
-				projectId: cfg.projectId,
+				configured: Boolean(auth && auth.signedIn),
+				service: 'Agent-Proxy',
 				model,
 				models,
 				auth,
@@ -420,9 +399,8 @@ class ChatViewProvider {
 			this._post({ type: 'append', item: this._pushItem({ kind: 'info', text: 'Es läuft bereits ein Vorgang. Erst stoppen oder warten.' }) });
 			return;
 		}
-		const apiKey = await this.getApiKey();
-		if (!apiKey) {
-			this._post({ type: 'append', item: this._pushItem({ kind: 'error', text: 'Kein Firebase API-Key gesetzt. Über „API-Key setzen" den Web-API-Key des Projekts eintragen.' }) });
+		if (!this.auth || !await this.auth.isSignedIn()) {
+			this._post({ type: 'append', item: this._pushItem({ kind: 'error', text: 'Nicht angemeldet. In der Statusleiste unten oder per Kommando „Agent: Mit Google anmelden“ anmelden.' }) });
 			return;
 		}
 
@@ -440,7 +418,7 @@ class ChatViewProvider {
 		try {
 			const cfg = this.config();
 			const client = await this.buildClient();
-			this.log.info(`Agent-Lauf gestartet (Modell: ${client.model}, Modus: ${cfg.approvalMode}, Weg: ${client.kind === 'proxy' ? `Proxy (${client.projectId})` : `AI Logic (${cfg.backend})`})`);
+			this.log.info(`Agent-Lauf gestartet (Modell: ${client.model}, Modus: ${cfg.approvalMode}, Proxy: ${client.projectId})`);
 			const host = this.getHost();
 
 			const fileTree = await host.listProjectFiles(cfg.maxTreeEntries);
@@ -520,9 +498,8 @@ class ChatViewProvider {
 			this._pushAndSend({ kind: 'info', text: 'Bitte warten, bis der laufende Vorgang abgeschlossen ist.' });
 			return;
 		}
-		const apiKey = await this.getApiKey();
-		if (!apiKey) {
-			this._pushAndSend({ kind: 'error', text: 'Kein Firebase API-Key gesetzt.' });
+		if (!this.auth || !await this.auth.isSignedIn()) {
+			this._pushAndSend({ kind: 'error', text: 'Nicht angemeldet – zuerst „Agent: Mit Google anmelden“ ausführen.' });
 			return;
 		}
 		const editor = vscode.window.activeTextEditor
@@ -684,9 +661,9 @@ class ChatViewProvider {
 		<button id="btn-del-session" class="secondary" title="Sitzung löschen">🗑</button>
 	</div>
 	<div id="setup" class="hidden">
-		<p><strong>Firebase AI Logic ist noch nicht verbunden.</strong></p>
-		<p>Web-API-Key des Firebase-Projekts hinterlegen (Console → Projekteinstellungen → Allgemein).</p>
-		<button id="btn-setkey">API-Key setzen</button>
+		<p><strong>Noch nicht angemeldet.</strong></p>
+		<p>Mit dem Google-Konto anmelden – mehr ist nicht nötig.</p>
+		<button id="btn-signin">Mit Google anmelden</button>
 		<button id="btn-settings" class="secondary">Einstellungen</button>
 	</div>
 	<div id="messages"></div>
@@ -725,4 +702,4 @@ function truncate(s, n) {
 	return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-module.exports = { ChatViewProvider, SECRET_KEY };
+module.exports = { ChatViewProvider };

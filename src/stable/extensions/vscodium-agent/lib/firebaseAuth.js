@@ -4,12 +4,12 @@
  * Ablauf (OAuth 2.0 für installierte Apps, PKCE):
  *   1. Loopback-Server auf 127.0.0.1:<zufälliger Port> starten.
  *   2. Browser zur Google-Anmeldung öffnen (code_challenge = S256, state gegen CSRF).
- *   3. Redirect liefert den Auth-Code an den Loopback; Code → Google-Tokens tauschen.
- *   4. Google-ID-Token bei Firebase einlösen (accounts:signInWithIdp) →
- *      Firebase-ID-Token + Refresh-Token.
+ *   3. Redirect liefert den Auth-Code an den Loopback.
+ *   4. Auth-Code + PKCE-Verifier ans Auth-Relay des Agent-Proxys (/v1/auth/exchange) –
+ *      OAuth-Client-Secret und Firebase-Web-API-Key leben NUR dort (Secret Manager),
+ *      nie im Client. Zurück kommen Firebase-ID-Token + Refresh-Token.
  *
- * Der Client-Secret eines "Desktop-App"-OAuth-Clients gilt laut Google-Doku ausdrücklich
- * NICHT als vertraulich – die eigentliche Sicherheit liefern PKCE und der Loopback.
+ * Auch die Token-Erneuerung läuft über das Relay (/v1/auth/refresh).
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
@@ -18,9 +18,6 @@ const crypto = require('crypto');
 const http = require('http');
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
-const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
-const SIGNIN_WITH_IDP_URL = 'https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp';
-const REFRESH_URL = 'https://securetoken.googleapis.com/v1/token';
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 class AuthError extends Error {
@@ -65,20 +62,41 @@ function htmlPage(title, body) {
 		`</head><body><div><h1>${title}</h1><p>${body}</p></div></body></html>`;
 }
 
+/** POST ans Auth-Relay des Proxys; Fehlerkörper {error} wird zur AuthError-Meldung. */
+async function postAuthRelay({ proxyUrl, path, payload, fetchImpl, timeoutMs }) {
+	let res;
+	try {
+		res = await fetchImpl(`${proxyUrl}${path}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(payload),
+			signal: AbortSignal.timeout(timeoutMs)
+		});
+	} catch (err) {
+		throw new AuthError(`Agent-Proxy nicht erreichbar: ${err.name === 'TimeoutError' ? 'Zeitüberschreitung' : err.message}`);
+	}
+	let json;
+	try { json = await res.json(); } catch (_e) { json = {}; }
+	if (!res.ok) {
+		throw new AuthError(json.error || `Agent-Proxy antwortet mit HTTP ${res.status}`);
+	}
+	return json;
+}
+
 /**
  * Kompletter Anmelde-Flow. Alle Netz-/Browser-Zugriffe injizierbar (Tests).
  *
- * @param {{ clientId: string, clientSecret: string, apiKey: string,
+ * @param {{ clientId: string, proxyUrl: string,
  *           openBrowser: (url: string) => Promise<void> | void,
  *           fetchImpl?: typeof fetch, timeoutMs?: number, signal?: AbortSignal }} options
  * @returns {Promise<{ idToken: string, refreshToken: string, expiresAt: number, email: string }>}
  */
 async function signInWithGoogle(options) {
-	const { clientId, clientSecret, apiKey, openBrowser, signal } = options;
-	if (!clientId || !clientSecret) {
-		throw new AuthError('OAuth-Client fehlt (Einstellungen: vscodiumAgent.auth.googleClientId/-Secret).');
+	const { clientId, proxyUrl, openBrowser, signal } = options;
+	if (!clientId) {
+		throw new AuthError('OAuth-Client-ID fehlt (fest eingebaut in lib/saasConfig.js – vor dem Release eintragen).');
 	}
-	if (!apiKey) { throw new AuthError('Firebase Web-API-Key fehlt.'); }
+	if (!proxyUrl) { throw new AuthError('Proxy-URL fehlt (Einstellung vscodiumAgent.proxy.url).'); }
 	if (signal && signal.aborted) { throw new AuthError('Anmeldung abgebrochen.'); }
 	const fetchImpl = options.fetchImpl || fetch;
 	const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
@@ -152,72 +170,44 @@ async function signInWithGoogle(options) {
 		server.close(); // idempotent – doppelt schließen ist harmlos
 	}
 
-	// Auth-Code → Google-Tokens (der PKCE-Verifier belegt den Ursprung der Anfrage).
-	const tokenRes = await fetchImpl(GOOGLE_TOKEN_URL, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({
-			code,
-			client_id: clientId,
-			client_secret: clientSecret,
-			redirect_uri: redirectUri,
-			grant_type: 'authorization_code',
-			code_verifier: verifier
-		}).toString()
+	// Auth-Code + PKCE-Verifier ans Relay – die Geheimnisse (Client-Secret, Web-API-Key)
+	// setzt der Proxy serverseitig ein; die Ablaufzeit rechnet der Client mit SEINER Uhr.
+	const json = await postAuthRelay({
+		proxyUrl, path: '/v1/auth/exchange',
+		payload: { code, codeVerifier: verifier, redirectUri },
+		fetchImpl, timeoutMs: 30000
 	});
-	const tokenJson = await tokenRes.json();
-	if (!tokenRes.ok || !tokenJson.id_token) {
-		throw new AuthError(`Token-Tausch fehlgeschlagen: ${tokenJson.error_description || tokenJson.error || tokenRes.status}`);
+	if (!json.idToken || !json.refreshToken) {
+		throw new AuthError('Unvollständige Antwort des Auth-Relays (idToken/refreshToken fehlt).');
 	}
-
-	// Google-ID-Token bei Firebase einlösen.
-	const idpRes = await fetchImpl(`${SIGNIN_WITH_IDP_URL}?key=${encodeURIComponent(apiKey)}`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			postBody: `id_token=${tokenJson.id_token}&providerId=google.com`,
-			requestUri: 'http://localhost',
-			returnSecureToken: true
-		})
-	});
-	const idpJson = await idpRes.json();
-	if (!idpRes.ok || !idpJson.idToken || !idpJson.refreshToken) {
-		const message = (idpJson.error && idpJson.error.message) || idpRes.status;
-		throw new AuthError(`Firebase-Anmeldung fehlgeschlagen: ${message}`);
-	}
-	const expiresInSec = parseInt(idpJson.expiresIn || '3600', 10);
 	return {
-		idToken: idpJson.idToken,
-		refreshToken: idpJson.refreshToken,
-		expiresAt: Date.now() + expiresInSec * 1000,
-		email: idpJson.email || (decodeJwtPayload(idpJson.idToken) || {}).email || ''
+		idToken: json.idToken,
+		refreshToken: json.refreshToken,
+		expiresAt: Date.now() + (parseInt(json.expiresInSec, 10) || 3600) * 1000,
+		email: json.email || (decodeJwtPayload(json.idToken) || {}).email || ''
 	};
 }
 
 /**
- * Firebase-ID-Token erneuern. Achtung: Der Refresh-Token kann rotieren –
- * der zurückgegebene ersetzt den gespeicherten.
+ * Firebase-ID-Token über das Auth-Relay erneuern. Achtung: Der Refresh-Token kann
+ * rotieren – der zurückgegebene ersetzt den gespeicherten.
  */
-async function refreshIdToken({ apiKey, refreshToken, fetchImpl }) {
-	if (!apiKey) { throw new AuthError('Firebase Web-API-Key fehlt.'); }
-	const doFetch = fetchImpl || fetch;
-	const res = await doFetch(`${REFRESH_URL}?key=${encodeURIComponent(apiKey)}`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }).toString(),
-		// Hängende Erneuerungen offen zu lassen wäre ein unbegrenztes Race-Fenster
-		// (z. B. Abmelden während der Wartezeit).
-		signal: AbortSignal.timeout(20000)
+async function refreshIdToken({ proxyUrl, refreshToken, fetchImpl }) {
+	if (!proxyUrl) { throw new AuthError('Proxy-URL fehlt (Einstellung vscodiumAgent.proxy.url).'); }
+	// Zeitlimit: Hängende Erneuerungen offen zu lassen wäre ein unbegrenztes Race-Fenster
+	// (z. B. Abmelden während der Wartezeit).
+	const json = await postAuthRelay({
+		proxyUrl, path: '/v1/auth/refresh',
+		payload: { refreshToken },
+		fetchImpl: fetchImpl || fetch, timeoutMs: 20000
 	});
-	const json = await res.json();
-	if (!res.ok || !json.id_token) {
-		const message = (json.error && json.error.message) || res.status;
-		throw new AuthError(`Token-Erneuerung fehlgeschlagen: ${message}`);
+	if (!json.idToken) {
+		throw new AuthError('Unvollständige Antwort des Auth-Relays (idToken fehlt).');
 	}
 	return {
-		idToken: json.id_token,
-		refreshToken: json.refresh_token || refreshToken,
-		expiresAt: Date.now() + parseInt(json.expires_in || '3600', 10) * 1000
+		idToken: json.idToken,
+		refreshToken: json.refreshToken || refreshToken,
+		expiresAt: Date.now() + (parseInt(json.expiresInSec, 10) || 3600) * 1000
 	};
 }
 

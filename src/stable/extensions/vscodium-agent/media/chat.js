@@ -96,7 +96,7 @@
 			send();
 		}
 	});
-	document.getElementById('btn-setkey').addEventListener('click', () => vscode.postMessage({ type: 'setApiKey' }));
+	document.getElementById('btn-signin').addEventListener('click', () => vscode.postMessage({ type: 'authClick' }));
 	document.getElementById('btn-settings').addEventListener('click', () => vscode.postMessage({ type: 'openSettings' }));
 
 	// ── Rendering ─────────────────────────────────────────────────────────────
@@ -290,7 +290,7 @@
 				}
 				elMessages.innerHTML = '';
 				elSetup.classList.toggle('hidden', msg.state.configured);
-				elStatusProject.textContent = msg.state.projectId;
+				elStatusProject.textContent = msg.state.service || '';
 				renderModels(msg.state.models, msg.state.model);
 				renderAuth(msg.state.auth);
 				elStatusMode.textContent = msg.state.approvalMode === 'review' ? 'Review-Modus' : 'Auto-Modus';

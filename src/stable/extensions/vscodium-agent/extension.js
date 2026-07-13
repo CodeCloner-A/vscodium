@@ -5,15 +5,19 @@
 'use strict';
 
 const vscode = require('vscode');
-const { ChatViewProvider, SECRET_KEY } = require('./ui/chatViewProvider');
+const { ChatViewProvider } = require('./ui/chatViewProvider');
 const { InlineEditController } = require('./ui/inlineEditController');
 const { AgentCodeActionProvider } = require('./ui/codeActions');
 const { DIFF_SCHEME, EXCLUDED_DIRS } = require('./lib/workspaceHost');
 const { ActivityIndex } = require('./lib/activityIndex');
 const { createLogger } = require('./lib/logger');
 const { AuthManager, AUTH_SECRET_KEY } = require('./lib/authManager');
+const { ProxyClient, formatUsage } = require('./lib/proxyClient');
+const { GOOGLE_OAUTH_CLIENT_ID } = require('./lib/saasConfig');
 
 const ACTIVITY_STATE_KEY = 'vscodiumAgent.activity.v1';
+// BYOK-Altlast (bis v0.8.0): gespeicherter Firebase-Web-API-Key. Wird beim Start gelöscht.
+const LEGACY_API_KEY_SECRET = 'vscodiumAgent.firebaseApiKey';
 
 /** @param {vscode.ExtensionContext} context */
 function activate(context) {
@@ -31,6 +35,10 @@ function activate(context) {
 	// SaaS-Anmeldung (Phase S): Google-Login, Refresh-Token in SecretStorage.
 	const auth = new AuthManager({ secrets: context.secrets, log: logger });
 	provider.auth = auth;
+
+	// Einmal-Migration (BYOK-Rückbau, v0.9.0): Der API-Key-Pfad ist weg, ein liegen
+	// gebliebener Key im Keyring wäre nur noch ein unnötiges Geheimnis.
+	void context.secrets.delete(LEGACY_API_KEY_SECRET);
 	/** @type {AbortController|null} laufender Anmeldeversuch */
 	let signInFlow = null;
 
@@ -61,44 +69,14 @@ function activate(context) {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('vscodiumAgent.setApiKey', async () => {
-			const value = await vscode.window.showInputBox({
-				title: 'Firebase Web-API-Key',
-				prompt: 'API-Key aus der Firebase Console (Projekteinstellungen → Allgemein → Web-App → apiKey)',
-				password: true,
-				ignoreFocusOut: true,
-				placeHolder: 'AIza…'
-			});
-			if (value) {
-				const previous = await context.secrets.get(SECRET_KEY);
-				await context.secrets.store(SECRET_KEY, value.trim());
-				// Anderer Key = anderes Firebase-Projekt: Tokens des alten Projekts sind
-				// dort wertlos – Anmeldung zurücksetzen statt kryptischer Refresh-Fehler.
-				if (previous && previous !== value.trim() && await auth.isSignedIn()) {
-					await auth.signOut();
-					void vscode.window.showInformationMessage('Firebase API-Key gespeichert – bitte erneut mit Google anmelden (Projektwechsel).');
-				} else {
-					void vscode.window.showInformationMessage('Firebase API-Key gespeichert (SecretStorage).');
-				}
-				void provider._sendInit();
-			}
-		}),
-
-		vscode.commands.registerCommand('vscodiumAgent.clearApiKey', async () => {
-			await context.secrets.delete(SECRET_KEY);
-			if (await auth.isSignedIn()) { await auth.signOut(); }
-			void vscode.window.showInformationMessage('Firebase API-Key gelöscht.');
-			void provider._sendInit();
-		}),
-
 		vscode.commands.registerCommand('vscodiumAgent.testConnection', async () => {
 			await vscode.window.withProgress(
-				{ location: vscode.ProgressLocation.Notification, title: 'Teste Firebase AI Logic…' },
+				{ location: vscode.ProgressLocation.Notification, title: 'Teste Agent-Proxy…' },
 				async () => {
 					try {
 						const client = await provider.buildClient();
 						const text = await client.ping();
-						void vscode.window.showInformationMessage(`Verbindung OK (Projekt "${client.projectId}", Modell "${client.model}"): ${text.slice(0, 80)}`);
+						void vscode.window.showInformationMessage(`Verbindung OK (Agent-Proxy ${client.projectId}, Modell "${client.model}"): ${text.slice(0, 80)}`);
 					} catch (err) {
 						logger.error('Verbindungstest fehlgeschlagen', err);
 						const hint = err && err.hint ? ` – ${err.hint}` : '';
@@ -110,19 +88,13 @@ function activate(context) {
 
 		vscode.commands.registerCommand('vscodiumAgent.signIn', async () => {
 			const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
-			const clientId = cfg.get('auth.googleClientId', '');
-			const clientSecret = cfg.get('auth.googleClientSecret', '');
-			const apiKey = await context.secrets.get(SECRET_KEY);
-			if (!apiKey) {
-				void vscode.window.showErrorMessage('Zuerst den Firebase Web-API-Key setzen („Agent: Firebase API-Key setzen“).');
+			const proxyUrl = String(cfg.get('proxy.url', '')).replace(/\/+$/, '');
+			if (!proxyUrl) {
+				void vscode.window.showErrorMessage('Keine Proxy-URL konfiguriert (vscodiumAgent.proxy.url).');
 				return;
 			}
-			if (!clientId || !clientSecret) {
-				const action = await vscode.window.showErrorMessage(
-					'OAuth-Client fehlt: In der GCP Console einen „Desktop-App“-OAuth-Client anlegen und in den Einstellungen eintragen.',
-					'Einstellungen öffnen'
-				);
-				if (action) { void vscode.commands.executeCommand('workbench.action.openSettings', 'vscodiumAgent.auth'); }
+			if (!GOOGLE_OAUTH_CLIENT_ID) {
+				void vscode.window.showErrorMessage('OAuth-Client-ID fehlt im Build (lib/saasConfig.js) – dieses Paket kann keine Anmeldung durchführen.');
 				return;
 			}
 			// Nur ein Anmeldeversuch zur Zeit: ein neuer bricht den alten ab
@@ -136,7 +108,7 @@ function activate(context) {
 					token.onCancellationRequested(() => flow.abort());
 					try {
 						const { email } = await auth.signIn({
-							clientId, clientSecret, apiKey,
+							clientId: GOOGLE_OAUTH_CLIENT_ID, proxyUrl,
 							signal: flow.signal,
 							openBrowser: (url) => vscode.env.openExternal(vscode.Uri.parse(url))
 						});
@@ -172,24 +144,46 @@ function activate(context) {
 				void vscode.window.showErrorMessage('Keine Proxy-URL konfiguriert (vscodiumAgent.proxy.url).');
 				return;
 			}
-			const apiKey = await context.secrets.get(SECRET_KEY);
-			if (!apiKey) {
-				void vscode.window.showErrorMessage('Zuerst den Firebase Web-API-Key setzen („Agent: Firebase API-Key setzen“).');
-				return;
-			}
 			await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Teste Agent-Proxy…' },
 				async () => {
 					try {
-						const idToken = await auth.getIdToken(apiKey);
-						const res = await fetch(`${proxyUrl}/v1/models`, { headers: { 'Authorization': `Bearer ${idToken}` } });
-						if (!res.ok) { throw new Error(`Proxy antwortet mit HTTP ${res.status}`); }
-						const json = await res.json();
-						const ids = (json.models || []).map(m => m.id).join(', ');
+						// Exakt der Produktionspfad: gleicher Client, gleiche Token-Beschaffung.
+						const client = new ProxyClient({ baseUrl: proxyUrl, getIdToken: () => auth.getIdToken(proxyUrl) });
+						const models = await client.listModels(AbortSignal.timeout(15000));
+						const ids = models.map(m => m.id).join(', ');
 						void vscode.window.showInformationMessage(`Proxy OK – Angebot: ${ids || '(leer)'}`);
 					} catch (err) {
 						logger.error('Proxy-Test fehlgeschlagen', err);
-						void vscode.window.showErrorMessage(`Proxy-Test fehlgeschlagen: ${err.message}`);
+						const hint = err.hint ? ` ${err.hint}` : '';
+						void vscode.window.showErrorMessage(`Proxy-Test fehlgeschlagen: ${err.message}${hint}`);
+					}
+				}
+			);
+		}),
+
+		vscode.commands.registerCommand('vscodiumAgent.showUsage', async () => {
+			const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
+			const proxyUrl = String(cfg.get('proxy.url', '')).replace(/\/+$/, '');
+			if (!proxyUrl) {
+				void vscode.window.showErrorMessage('Keine Proxy-URL konfiguriert (vscodiumAgent.proxy.url).');
+				return;
+			}
+			if (!await auth.isSignedIn()) {
+				void vscode.window.showErrorMessage('Nicht angemeldet – zuerst „Agent: Mit Google anmelden“ ausführen.');
+				return;
+			}
+			await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'Frage Verbrauch ab…' },
+				async () => {
+					try {
+						const client = new ProxyClient({ baseUrl: proxyUrl, getIdToken: () => auth.getIdToken(proxyUrl) });
+						const usage = await client.getUsage(AbortSignal.timeout(15000));
+						void vscode.window.showInformationMessage(formatUsage(usage));
+					} catch (err) {
+						logger.error('Verbrauchsabfrage fehlgeschlagen', err);
+						const hint = err.hint ? ` ${err.hint}` : '';
+						void vscode.window.showErrorMessage(`Verbrauchsabfrage fehlgeschlagen: ${err.message}${hint}`);
 					}
 				}
 			);

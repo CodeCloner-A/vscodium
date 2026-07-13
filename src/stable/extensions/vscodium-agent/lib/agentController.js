@@ -1,7 +1,7 @@
 /*---------------------------------------------------------------------------------------------
  * VSCodium Agent – Agent-Loop (Plan → Tools → Iteration) mit Drift-Schutz.
  *
- * Unabhängig von VS Code: braucht nur client (FirebaseAiLogicClient-kompatibel),
+ * Unabhängig von VS Code: braucht nur client (ProxyClient-kompatibel: generateContent),
  * host (siehe tools.js) und ui (Ereignis-Senke).
  *
  *   ui = {

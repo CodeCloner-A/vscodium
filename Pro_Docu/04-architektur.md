@@ -17,17 +17,22 @@
 │  │  lib/agentController.js   ── Agent-Loop, Drift-Schutz    │  │
 │  │        │            │                                    │  │
 │  │        ▼            ▼                                    │  │
-│  │  lib/tools.js   lib/firebaseClient.js ──► Firebase       │  │
-│  │  (Tool-Schema,  (REST, Retry,             AI Logic       │  │
-│  │   Dispatch)      Fehlerbilder)            (Gemini)       │  │
-│  │        │                                                 │  │
-│  │        ▼                                                 │  │
-│  │  lib/workspaceHost.js ── VS-Code-APIs: Dateien, Suche,   │  │
-│  │  (Pfad-Sandbox, Review-  Diagnostics, child_process      │  │
+│  │  lib/tools.js   lib/proxyClient.js ─────► Agent-Proxy    │  │
+│  │  (Tool-Schema,  (REST/SSE, Bearer-        (Cloud Run)    │  │
+│  │   Dispatch)      ID-Token, Retry)              │         │  │
+│  │        │        lib/authManager.js ───────────┤         │  │
+│  │        ▼        (Login, Token-Refresh          ▼         │  │
+│  │  lib/workspaceHost.js    via Auth-Relay)   Vertex AI     │  │
+│  │  (Pfad-Sandbox, Review-                    (Gemini)      │  │
 │  │   Gating, Diff-Provider)                                 │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+Seit v0.9.0 (BYOK-Rückbau) läuft **alle** KI-Kommunikation über den Agent-Proxy:
+IDE → Cloud Run (`agent-proxy/`, prüft Firebase-ID-Token, Allowlist, Quoten) →
+Vertex AI. Auch Anmeldung und Token-Erneuerung gehen über den Proxy (Auth-Relay) —
+die Extension enthält keinerlei Schlüssel, nur die öffentliche OAuth-Client-ID.
 
 ## Der Agent-Loop
 
@@ -48,9 +53,9 @@ Drei Details sind wichtig für Korrektheit: Die Modell-Antwort wird **unverände
 
 `workspaceHost.applyChange()` und `runCommand()` blockieren im Review-Modus auf einer Promise, die erst die Benutzerentscheidung aus der Webview auflöst. Für das Modell ist eine Ablehnung ein normales Tool-Ergebnis (`status: "rejected"`), auf das es reagieren kann. Diff-Vorschau: Alt/Neu-Inhalte werden über einen virtuellen `TextDocumentContentProvider` (Schema `vscodium-agent-diff`) an `vscode.diff` gereicht — es wird nichts auf Platte geschrieben, bevor Du zustimmst.
 
-## Firebase-Anbindung
+## Modell-Anbindung (Agent-Proxy)
 
-`firebaseClient.js` spricht `https://firebasevertexai.googleapis.com/v1beta/…:generateContent` direkt per `fetch` an — dependency-frei, Header `x-goog-api-key`. Beide AI-Logic-Backends werden unterstützt (Gemini Developer API als Standard, Vertex AI mit Region per Einstellung). Eingebaut: Retry bei 429/5xx, präzise deutsche Fehlerbilder (API nicht aktiviert → Console-Link, 401/403 → Key-Hinweise, 404 → Modellname).
+`proxyClient.js` spricht `{proxy.url}/v1/models/{model}:generateContent|streamGenerateContent` per `fetch` an — dependency-frei, `Authorization: Bearer <Firebase-ID-Token>` (pro Anfrage frisch vom `authManager`, Auto-Erneuerung über das Auth-Relay des Proxys). Standort-Routing und Modell-Allowlist liegen serverseitig (`agent-proxy/lib/catalog.js`). Eingebaut: Retry bei 429/5xx (Quota-429 mit `reason: quota` bewusst ohne Retry), präzise deutsche Fehlerbilder (401 → Anmelde-Hinweis, 404 → Katalog-Hinweis, 429 → Kontingent). `firebaseClient.js` enthält nur noch die geteilten Gemini-Format-Helfer (SSE-Parser, Chunk-Merge, Antwort-Auswertung); der frühere BYOK-Direktpfad (`x-goog-api-key` gegen firebasevertexai.googleapis.com) wurde mit v0.9.0 entfernt.
 
 ## Integration in den IDE-Build
 
@@ -66,7 +71,11 @@ src/stable/extensions/vscodium-agent/
 │   ├── agentController.js  Loop, Iterationslimit, Drift-Erinnerung
 │   ├── tools.js            Tool-Deklarationen (Gemini-Schema) + Dispatch
 │   ├── prompts.js          Systemprompt, Drift-Reminder
-│   ├── firebaseClient.js   REST-Client Firebase AI Logic
+│   ├── proxyClient.js      REST/SSE-Client zum Agent-Proxy (einziger Modell-Transport)
+│   ├── authManager.js      Anmeldung, ID-Token-Cache, Refresh via Auth-Relay
+│   ├── firebaseAuth.js     Browser-Login (PKCE + Loopback), Relay-Aufrufe
+│   ├── saasConfig.js       Öffentliche OAuth-Client-ID (fest eingebaut)
+│   ├── firebaseClient.js   Gemini-Format-Helfer (SSE-Parser, Merge, Auswertung)
 │   └── workspaceHost.js    VS-Code-Host: FS, Suche, Diff, Exec, Diagnostics
 ├── ui/chatViewProvider.js  Webview-Provider, Sitzung, Freigabe-Vermittlung
 ├── media/                  chat.js, chat.css, agent.svg (Webview-Assets)

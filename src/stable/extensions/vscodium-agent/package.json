@@ -1,8 +1,8 @@
 {
   "name": "vscodium-agent",
   "displayName": "VSCodium Agent",
-  "description": "Integrierter KI-Agent (Firebase AI Logic / Gemini): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
-  "version": "0.7.0",
+  "description": "Integrierter KI-Agent (Gemini über den Agent-Proxy): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
+  "version": "0.9.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
@@ -52,18 +52,8 @@
     },
     "commands": [
       {
-        "command": "vscodiumAgent.setApiKey",
-        "title": "Firebase API-Key setzen",
-        "category": "Agent"
-      },
-      {
-        "command": "vscodiumAgent.clearApiKey",
-        "title": "Firebase API-Key löschen",
-        "category": "Agent"
-      },
-      {
         "command": "vscodiumAgent.testConnection",
-        "title": "Verbindung zu Firebase AI Logic testen",
+        "title": "Verbindung zum Agent-Proxy testen",
         "category": "Agent"
       },
       {
@@ -79,6 +69,11 @@
       {
         "command": "vscodiumAgent.testProxy",
         "title": "Proxy-Verbindung testen",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.showUsage",
+        "title": "Verbrauch anzeigen",
         "category": "Agent"
       },
       {
@@ -160,48 +155,10 @@
     "configuration": {
       "title": "VSCodium Agent",
       "properties": {
-        "vscodiumAgent.firebase.projectId": {
-          "type": "string",
-          "default": "controlling-man",
-          "markdownDescription": "Firebase-Projekt-ID für AI Logic (Standard: `controlling-man`)."
-        },
-        "vscodiumAgent.firebase.appId": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Optional: Firebase App-ID (`1:…:web:…`) aus der Firebase Console. Wird als `X-Firebase-Appid`-Header mitgesendet."
-        },
-        "vscodiumAgent.firebase.backend": {
-          "type": "string",
-          "enum": [
-            "googleAI",
-            "vertexAI"
-          ],
-          "default": "googleAI",
-          "enumDescriptions": [
-            "Gemini Developer API über Firebase AI Logic (Standard, keine Location nötig)",
-            "Vertex AI Gemini API über Firebase AI Logic (Location erforderlich)"
-          ],
-          "description": "Welches AI-Logic-Backend verwendet wird."
-        },
-        "vscodiumAgent.firebase.location": {
-          "type": "string",
-          "default": "us-central1",
-          "markdownDescription": "Experten-Override: Vertex-AI-Region (nur bei Backend `vertexAI`). Modelle mit festem Standort (Gemini 3.x → `global`) übersteuern diese Einstellung automatisch."
-        },
         "vscodiumAgent.proxy.url": {
           "type": "string",
           "default": "https://agent-proxy-476281311476.europe-west1.run.app",
-          "markdownDescription": "Basis-URL des Agent-Proxys (Cloud Run). Der Proxy prüft die Anmeldung und routet die Modelle serverseitig (siehe `docs/agent-proxy.md`)."
-        },
-        "vscodiumAgent.auth.googleClientId": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "OAuth-Client-ID (Typ **Desktop-App**) aus der GCP Console → APIs & Dienste → Anmeldedaten. Für die Google-Anmeldung (SaaS-Login)."
-        },
-        "vscodiumAgent.auth.googleClientSecret": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Client-Secret des Desktop-App-OAuth-Clients. Laut Google-Doku bei installierten Apps **nicht vertraulich** – die Sicherheit liefern PKCE und der Loopback-Redirect."
+          "markdownDescription": "Basis-URL des Agent-Proxys (Cloud Run). Der Proxy prüft die Anmeldung, hält Geheimnisse (Auth-Relay) und routet die Modelle serverseitig (siehe `docs/agent-proxy.md`)."
         },
         "vscodiumAgent.model": {
           "type": "string",
