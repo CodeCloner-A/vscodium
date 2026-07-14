@@ -6,6 +6,8 @@ VSCodium*
 # oben (vscode*, VSCodium*) sonst mit erfassen – neue Dateien wären für Git unsichtbar.
 !src/stable/extensions/vscodium-agent/
 !src/stable/extensions/vscodium-agent/**
+# … aber paketierte Builds (npx @vscode/vsce package) bleiben draußen.
+src/stable/extensions/vscodium-agent/*.vsix
 .DS_Store
 *.env
 assets/
