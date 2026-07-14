@@ -12,6 +12,6 @@
 // OAuth-Client vom Typ „Desktop-App“ (GCP Console → APIs & Dienste → Anmeldedaten).
 // Bewusst fest eingebaut – das ist der öffentliche Teil des OAuth-Clients; das
 // zugehörige Secret kennt nur der Proxy.
-const GOOGLE_OAUTH_CLIENT_ID = '476281311476-3j1hkvbcom4q2lvjtbgovhcfq5drnpq8.apps.googleusercontent.com';
+const GOOGLE_OAUTH_CLIENT_ID = '476281311476-6rvnd9gbma58slcm9o119jm338ucfbkq.apps.googleusercontent.com';
 
 module.exports = { GOOGLE_OAUTH_CLIENT_ID };
