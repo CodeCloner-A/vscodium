@@ -10,8 +10,8 @@
 'use strict';
 
 // OAuth-Client vom Typ „Desktop-App“ (GCP Console → APIs & Dienste → Anmeldedaten).
-// Vor dem ersten Release eintragen; leer lassen führt zu einer klaren Fehlermeldung
-// beim Anmelden statt zu einem kaputten Browser-Flow.
-const GOOGLE_OAUTH_CLIENT_ID = '';
+// Bewusst fest eingebaut – das ist der öffentliche Teil des OAuth-Clients; das
+// zugehörige Secret kennt nur der Proxy.
+const GOOGLE_OAUTH_CLIENT_ID = '476281311476-3j1hkvbcom4q2lvjtbgovhcfq5drnpq8.apps.googleusercontent.com';
 
 module.exports = { GOOGLE_OAUTH_CLIENT_ID };
