@@ -1,8 +1,8 @@
 {
 	"name": "vscodium-agent-proxy",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"private": true,
-	"description": "Cloud-Run-Proxy des VSCodium Agent: Firebase-Auth-Türsteher vor Vertex AI (Gemini), SSE-Streaming, serverseitiges Modell→Region-Routing, Firestore-Metering mit Monats-Quoten, Auth-Relay (Anmeldung/Token-Refresh ohne Schlüssel im Client), Chat-Sitzungs-Sync (Firestore, pro Nutzer und Projekt).",
+	"description": "Cloud-Run-Proxy des VSCodium Agent: Firebase-Auth-Türsteher vor Vertex AI (Gemini direkt, Claude via MaaS mit Format-Übersetzung), SSE-Streaming, serverseitiges Modell→Region-Routing, Firestore-Metering mit gewichteten Monats-Quoten, Auth-Relay, Chat-Sitzungs-Sync.",
 	"license": "MIT",
 	"engines": {
 		"node": ">=20"

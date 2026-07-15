@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const { createVerifier, TokenError } = require('../lib/verifyIdToken');
 const { createVertexClient, hostFor } = require('../lib/vertex');
 const { createMeter, monthKey } = require('../lib/metering');
+const { toAnthropicRequest, toGeminiResponse, createSseTranslator, ANTHROPIC_VERSION } = require('../lib/anthropic');
 const { createSessionStore, validWorkspace } = require('../lib/sessions');
 const { createAuthRelay } = require('../lib/authRelay');
 const { MODELS, findModel, publicCatalog } = require('../lib/catalog');
@@ -225,7 +226,8 @@ async function testMetering() {
 	const increments = Object.fromEntries(
 		write.updateTransforms.filter(t => t.increment).map(t => [t.fieldPath, t.increment.integerValue])
 	);
-	assert.deepStrictEqual(increments, { requests: '1', promptTokens: '100', candidateTokens: '400', totalTokens: '500' });
+	// Ohne quotaFactor gilt Faktor 1: weightedTokens = prompt + candidates.
+	assert.deepStrictEqual(increments, { requests: '1', promptTokens: '100', candidateTokens: '400', totalTokens: '500', weightedTokens: '500' });
 	assert.ok(write.updateTransforms.some(t => t.fieldPath === 'updatedAt' && t.setToServerValue === 'REQUEST_TIME'));
 
 	// Der Cache zieht mit: 500 + 500 = 1000 ≥ Limit → sofort gesperrt, ohne neuen Read.
@@ -286,10 +288,38 @@ async function testMetering() {
 
 	// snapshot: Anzeige-Form für GET /v1/usage.
 	const snap = await makeMeter(fakeFirestore({ usageTokens: 500, limitField: 2000, plan: 'pro' })).snapshot('user-123');
+	// Alt-Dokument ohne weightedTokens: die Anzeige fällt auf totalTokens zurück (max-Regel).
 	assert.deepStrictEqual(snap, {
 		month: monthKey(NOW_MS), plan: 'pro', limit: 2000, remaining: 1500,
-		promptTokens: 1, candidateTokens: 2, totalTokens: 500, requests: 9
+		promptTokens: 1, candidateTokens: 2, totalTokens: 500, weightedTokens: 500, requests: 9
 	});
+
+	// Gewichtete Quote: quotaFactor {input, output} multipliziert die Tokenzahlen.
+	const weightedFs = fakeFirestore({ usageTokens: 0 });
+	const weightedMeter = makeMeter(weightedFs);
+	assert.strictEqual((await weightedMeter.check('user-123')).allowed, true); // füllt den Cache
+	await weightedMeter.record('user-123', { promptTokens: 100, candidateTokens: 400, totalTokens: 500 }, { input: 18, output: 11 });
+	const weightedCommit = weightedFs.calls.filter(c => c.url.includes(':commit')).pop();
+	const weightedIncrements = Object.fromEntries(
+		weightedCommit.body.writes[0].updateTransforms.filter(t => t.increment).map(t => [t.fieldPath, t.increment.integerValue])
+	);
+	assert.strictEqual(weightedIncrements.weightedTokens, String(100 * 18 + 400 * 11), 'gewichtete Tokens = prompt*in + candidates*out');
+	assert.strictEqual(weightedIncrements.totalTokens, '500', 'Rohtokens bleiben ungewichtet erhalten');
+	// Cache-Mitschrift: 6200 gewichtete Tokens ≥ Limit 1000 → sofort gesperrt.
+	const weightedGate = await weightedMeter.check('user-123');
+	assert.deepStrictEqual({ allowed: weightedGate.allowed, reason: weightedGate.reason }, { allowed: false, reason: 'quota' });
+	assert.ok(weightedGate.error.includes('gewichteten Tokens'), weightedGate.error);
+
+	// Gemini-Denk-Tokens (totalTokenCount > prompt+candidates) zählen zum Output-Faktor:
+	// prompt 100×1 + (250−100)×4 = 700 – nicht nur die 50 sichtbaren candidateTokens.
+	const thoughtsFs = fakeFirestore({ usageTokens: 0 });
+	const thoughtsMeter = makeMeter(thoughtsFs);
+	await thoughtsMeter.record('user-123', { promptTokens: 100, candidateTokens: 50, totalTokens: 250 }, { input: 1, output: 4 });
+	const thoughtsCommit = thoughtsFs.calls.filter(c => c.url.includes(':commit')).pop();
+	const thoughtsIncrements = Object.fromEntries(
+		thoughtsCommit.body.writes[0].updateTransforms.filter(t => t.increment).map(t => [t.fieldPath, t.increment.integerValue])
+	);
+	assert.strictEqual(thoughtsIncrements.weightedTokens, '700', 'Denk-Tokens werden wie Output gewichtet');
 
 	// UIDs, die keine Firebase-UIDs sein können, werden nie zum Firestore-Pfad.
 	const weird = await meterA.check('../fremdes-dokument');
@@ -547,6 +577,359 @@ async function testGlobalRateLimitHttp() {
 		assert.strictEqual((await fetch(`${base}/v1/models`, { headers: authB })).status, 200);
 		assert.strictEqual((await fetch(`${base}/v1/models`, { headers: authA })).status, 429);
 		console.log('✔ Globaler Gesamtdeckel: greift über Nutzergrenzen hinweg (Schutz vor Konto-Fluten)');
+	} finally {
+		server.close();
+	}
+}
+
+// ── Anthropic-Übersetzer (Claude via Vertex MaaS) ───────────────────────────
+
+/** Mini-Merge auf Client-Art: sammelt Text, functionCalls, letzten finishReason + usageMetadata. */
+function collectGeminiSse(buffers) {
+	const text = [];
+	const functionCalls = [];
+	let finishReason;
+	let usageMetadata;
+	const raw = buffers.map(b => b.toString('utf8')).join('');
+	for (const line of raw.split(/\r?\n/)) {
+		if (!line.startsWith('data: ')) { continue; }
+		const chunk = JSON.parse(line.slice(6));
+		const cand = chunk.candidates && chunk.candidates[0];
+		for (const part of (cand && cand.content && cand.content.parts) || []) {
+			if (typeof part.text === 'string') { text.push(part.text); }
+			if (part.functionCall) { functionCalls.push(part.functionCall); }
+		}
+		if (cand && cand.finishReason) { finishReason = cand.finishReason; }
+		if (chunk.usageMetadata) { usageMetadata = chunk.usageMetadata; }
+	}
+	return { text: text.join(''), functionCalls, finishReason, usageMetadata, raw };
+}
+
+/** Anthropic-SSE-Ereignisse als Wire-Bytes (event:-Zeile + data:-Zeile, wie Vertex sie liefert). */
+function anthropicSse(events) {
+	return events.map(e => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join('');
+}
+
+async function testAnthropicTranslator() {
+	// ── Request: kompletter Agent-Chat-Verlauf mit Tool-Roundtrip ──
+	const gemini = {
+		systemInstruction: { role: 'system', parts: [{ text: 'Du bist der Agent.' }] },
+		contents: [
+			{ role: 'user', parts: [{ text: 'Lies zwei Dateien.' }] },
+			{
+				role: 'model', parts: [
+					{ text: 'Ich lese beide.' },
+					{ text: 'internes Denken', thought: true },                                  // → droppen
+					{ functionCall: { name: 'read_file', args: { path: 'a.js' } }, thoughtSignature: 'gemini-sig' },
+					{ functionCall: { name: 'search_project' } }                                  // args undefined → {}
+				]
+			},
+			{
+				role: 'user', parts: [
+					// absichtlich in umgekehrter Reihenfolge: Zuordnung läuft über den Namen
+					{ functionResponse: { name: 'search_project', response: { matchCount: 0 } } },
+					{ functionResponse: { name: 'read_file', response: { content: 'x' } } }
+				]
+			},
+			{ role: 'user', parts: [{ text: '   ' }] }                                           // nur Whitespace → Turn entfällt
+		],
+		tools: [{
+			functionDeclarations: [
+				{
+					name: 'read_file', description: 'Liest eine Datei.',
+					parameters: {
+						type: 'OBJECT',
+						properties: { path: { type: 'STRING', description: 'Pfad' }, start_line: { type: 'INTEGER' } },
+						required: ['path']
+					}
+				},
+				{ name: 'get_recent_activity', description: 'Aktivität.', parameters: { type: 'OBJECT', properties: {} } }
+			]
+		}],
+		toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+		generationConfig: { temperature: 0.2 }
+	};
+	const request = toAnthropicRequest(gemini, { maxTokensDefault: 12345 });
+
+	assert.strictEqual(request.anthropic_version, ANTHROPIC_VERSION);
+	assert.strictEqual(request.max_tokens, 12345, 'ohne maxOutputTokens greift der Default');
+	assert.deepStrictEqual(request.thinking, { type: 'disabled' });
+	assert.strictEqual(request.model, undefined, 'Vertex-MaaS-Body darf kein model-Feld tragen');
+	assert.ok(!JSON.stringify(request).includes('temperature'), 'Sampling-Parameter nie weiterreichen (400 auf Opus 4.8/Sonnet 5)');
+	assert.ok(!JSON.stringify(request).includes('gemini-sig') && !JSON.stringify(request).includes('internes Denken'),
+		'thought/thoughtSignature müssen gedroppt werden');
+	assert.strictEqual(request.system, 'Du bist der Agent.');
+
+	assert.deepStrictEqual(request.messages.map(m => m.role), ['user', 'assistant', 'user']);
+	const assistant = request.messages[1];
+	assert.deepStrictEqual(assistant.content[0], { type: 'text', text: 'Ich lese beide.' });
+	const toolUses = assistant.content.filter(b => b.type === 'tool_use');
+	assert.deepStrictEqual(toolUses.map(t => t.name), ['read_file', 'search_project']);
+	assert.deepStrictEqual(toolUses[1].input, {}, 'fehlende args werden zu {}');
+	const results = request.messages[2].content;
+	assert.deepStrictEqual(results.map(r => r.type), ['tool_result', 'tool_result']);
+	assert.strictEqual(results[0].tool_use_id, toolUses[1].id, 'Zuordnung per Name, nicht per Reihenfolge');
+	assert.strictEqual(results[1].tool_use_id, toolUses[0].id);
+	assert.strictEqual(results[1].content, JSON.stringify({ content: 'x' }));
+
+	// Tool-Schemata: Typen lowercase, required erhalten, leeres properties bleibt Objekt.
+	assert.deepStrictEqual(request.tools[0].input_schema, {
+		type: 'object',
+		properties: { path: { type: 'string', description: 'Pfad' }, start_line: { type: 'integer' } },
+		required: ['path']
+	});
+	assert.deepStrictEqual(request.tools[1].input_schema, { type: 'object', properties: {} });
+	assert.strictEqual(request.tool_choice, undefined, 'AUTO ist der Anthropic-Default');
+
+	// Inline-Edit-Form: systemInstruction ohne role, maxOutputTokens gewinnt, stream-Flag.
+	const inline = toAnthropicRequest({
+		systemInstruction: { parts: [{ text: 'Nur Code.' }] },
+		contents: [{ role: 'user', parts: [{ text: 'Mach.' }] }],
+		generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+	}, { maxTokensDefault: 12345, stream: true });
+	assert.strictEqual(inline.max_tokens, 8192);
+	assert.strictEqual(inline.stream, true);
+	assert.strictEqual(inline.system, 'Nur Code.');
+	assert.strictEqual(inline.tools, undefined);
+
+	// Kaputte Historie: functionResponse ohne offenen Aufruf → 400, kein Upstream-Weg.
+	assert.throws(() => toAnthropicRequest({
+		contents: [{ role: 'user', parts: [{ functionResponse: { name: 'x', response: {} } }] }]
+	}), (e) => e.status === 400);
+
+	// Abgebrochener Lauf: functionCall ohne functionResponse in der Historie (der Client
+	// stoppt vor dem Antwort-Push). Der unbeantwortete tool_use muss verschwinden, sonst
+	// lehnte Anthropic jede Folgeanfrage der Sitzung mit 400 ab; Text bleibt erhalten,
+	// Turns die dadurch leer würden, entfallen ganz.
+	const aborted = toAnthropicRequest({
+		contents: [
+			{ role: 'user', parts: [{ text: 'Aufgabe 1' }] },
+			{ role: 'model', parts: [{ text: 'Ich fange an.' }, { functionCall: { name: 'run_command', args: { command: 'npm test' } } }] },
+			{ role: 'user', parts: [{ text: 'Aufgabe 2 (nach Stopp)' }] },
+			{ role: 'model', parts: [{ functionCall: { name: 'list_files', args: {} } }] },
+			{ role: 'user', parts: [{ text: 'Aufgabe 3 (wieder gestoppt)' }] }
+		]
+	}, { maxTokensDefault: 100 });
+	assert.ok(!JSON.stringify(aborted.messages).includes('tool_use'), 'unbeantwortete tool_use-Blöcke müssen entfernt werden');
+	assert.deepStrictEqual(aborted.messages.map(m => m.role), ['user', 'assistant', 'user', 'user'],
+		'leer gewordene Assistant-Turns entfallen, Text-Turns bleiben');
+	assert.deepStrictEqual(aborted.messages[1].content, [{ type: 'text', text: 'Ich fange an.' }]);
+
+	// ── Response: Blöcke, stop_reason-Tabelle, usage ──
+	const full = toGeminiResponse({
+		content: [
+			{ type: 'thinking', thinking: 'geheim', signature: 's' },
+			{ type: 'text', text: 'Hi!' },
+			{ type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: 'a.js' } }
+		],
+		stop_reason: 'tool_use',
+		usage: { input_tokens: 100, output_tokens: 25 }
+	});
+	assert.deepStrictEqual(full.candidates[0].content.parts, [
+		{ text: 'Hi!' },
+		{ functionCall: { name: 'read_file', args: { path: 'a.js' } } }
+	], 'thinking wird nie durchgereicht');
+	assert.strictEqual(full.candidates[0].finishReason, 'STOP', 'tool_use MUSS als STOP ankommen (Agent-Loop)');
+	assert.deepStrictEqual(full.usageMetadata, { promptTokenCount: 100, candidatesTokenCount: 25, totalTokenCount: 125 });
+
+	for (const [reason, expected] of [
+		['end_turn', 'STOP'], ['stop_sequence', 'STOP'], ['pause_turn', 'STOP'],
+		['max_tokens', 'MAX_TOKENS'], ['refusal', 'SAFETY'], ['irgendwas_neues', 'OTHER']
+	]) {
+		assert.strictEqual(toGeminiResponse({ content: [], stop_reason: reason, usage: {} }).candidates[0].finishReason, expected, reason);
+	}
+	// Pre-Output-Refusal: leerer content → leere parts + SAFETY (Client zeigt Blockgrund).
+	const refused = toGeminiResponse({ content: [], stop_reason: 'refusal', usage: { input_tokens: 5, output_tokens: 0 } });
+	assert.deepStrictEqual(refused.candidates[0].content.parts, []);
+	assert.strictEqual(refused.candidates[0].finishReason, 'SAFETY');
+
+	// ── SSE-Übersetzung: Text + Tool-Aufruf über zerstückelte input_json_deltas ──
+	const wire = anthropicSse([
+		{ type: 'message_start', message: { usage: { input_tokens: 7, output_tokens: 1 } } },
+		{ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+		{ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hal' } },
+		{ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'lo Ü' } },
+		{ type: 'content_block_stop', index: 0 },
+		{ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_x', name: 'read_file' } },
+		{ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"pa' } },
+		{ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: 'th":"a.js"}' } },
+		{ type: 'content_block_stop', index: 1 },
+		{ type: 'ping' },
+		{ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 21 } },
+		{ type: 'message_stop' }
+	]);
+
+	function translate(chunks) {
+		const translator = createSseTranslator();
+		const out = [];
+		for (const piece of chunks) {
+			const buf = translator.push(Buffer.isBuffer(piece) ? piece : Buffer.from(piece, 'utf8'));
+			if (buf) { out.push(buf); }
+		}
+		const rest = translator.end();
+		if (rest) { out.push(rest); }
+		return out;
+	}
+
+	const wholeBuffers = translate([wire]);
+	const whole = collectGeminiSse(wholeBuffers);
+	assert.strictEqual(whole.text, 'Hallo Ü');
+	assert.deepStrictEqual(whole.functionCalls, [{ name: 'read_file', args: { path: 'a.js' } }]);
+	assert.strictEqual(whole.finishReason, 'STOP');
+	assert.deepStrictEqual(whole.usageMetadata, { promptTokenCount: 7, candidatesTokenCount: 21, totalTokenCount: 28 });
+
+	// Böse zerteilt: mitten in 'data: ', mitten im JSON, mitten im Mehrbyte-Zeichen 'Ü'.
+	const bytes = Buffer.from(wire, 'utf8');
+	const cutA = wire.indexOf('data: {"type":"content_block_delta"') + 3;
+	const cutB = bytes.indexOf(Buffer.from('Ü', 'utf8')) + 1; // mitten im 2-Byte-Zeichen
+	const cutC = wire.indexOf('"th\\":\\"'); // grob mitten im partial_json — Index im String reicht
+	const pieces = [];
+	const cuts = [...new Set([cutA, cutB, cutC].filter(c => c > 0).sort((a, b) => a - b))];
+	let prev = 0;
+	for (const cut of cuts) { pieces.push(bytes.slice(prev, cut)); prev = cut; }
+	pieces.push(bytes.slice(prev));
+	const splitResult = collectGeminiSse(translate(pieces));
+	assert.strictEqual(splitResult.text, whole.text, 'zerteilte Chunks müssen dasselbe Ergebnis liefern');
+	assert.deepStrictEqual(splitResult.functionCalls, whole.functionCalls);
+	assert.deepStrictEqual(splitResult.usageMetadata, whole.usageMetadata);
+
+	// Der ECHTE Usage-Scanner aus server.js muss die übersetzten Bytes zählen können.
+	const scanner = createUsageScanner();
+	for (const buf of wholeBuffers) { scanner.push(buf); }
+	assert.deepStrictEqual(scanner.usage(), { promptTokens: 7, candidateTokens: 21, totalTokens: 28 });
+
+	// Abgeschnittenes Tool-JSON (max_tokens mitten im Aufruf): Call verwerfen, sauber beenden.
+	const truncated = collectGeminiSse(translate([anthropicSse([
+		{ type: 'message_start', message: { usage: { input_tokens: 3, output_tokens: 1 } } },
+		{ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't', name: 'write_file' } },
+		{ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"a' } },
+		{ type: 'content_block_stop', index: 0 },
+		{ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 9 } },
+		{ type: 'message_stop' }
+	])]));
+	assert.deepStrictEqual(truncated.functionCalls, [], 'kaputtes Tool-JSON darf keinen functionCall erzeugen');
+	assert.strictEqual(truncated.finishReason, 'MAX_TOKENS');
+
+	// Abgerissener Strom ohne message_stop: end() liefert den Abschluss-Chunk (Metering zählt).
+	const torn = collectGeminiSse(translate([anthropicSse([
+		{ type: 'message_start', message: { usage: { input_tokens: 11, output_tokens: 1 } } },
+		{ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi' } }
+	])]));
+	assert.strictEqual(torn.text, 'Hi');
+	assert.strictEqual(torn.usageMetadata.promptTokenCount, 11);
+
+	// Client-Abbruch mitten im Strom (kein end(), Generator stirbt mit dem fetch): schon
+	// die Zwischen-Chunks tragen usageMetadata, damit der Scanner die (teuren) Input-
+	// Tokens zählt – kein Quota-Schlupfloch durch Abbrechen bei Opus-Preisen.
+	const abortTranslator = createSseTranslator();
+	const abortOut = abortTranslator.push(Buffer.from(anthropicSse([
+		{ type: 'message_start', message: { usage: { input_tokens: 500, output_tokens: 1 } } },
+		{ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'teuer' } }
+	]), 'utf8'));
+	const abortScanner = createUsageScanner();
+	abortScanner.push(abortOut);
+	assert.strictEqual(abortScanner.usage().promptTokens, 500, 'Abbruch: Input-Tokens zählen trotzdem');
+
+	console.log('✔ Anthropic-Übersetzer: Request (Tools/IDs/Drops), Response (stop_reason-Tabelle), SSE (zerteilte Chunks, Scanner, Abrisse)');
+}
+
+async function testClaudeHttp() {
+	// Ende-zu-Ende mit ECHTEM Vertex-Client (fake fetch): URL-Routing, Body-Übersetzung,
+	// Gemini-Antwort für den Client, gewichtetes Metering.
+	const upstreamCalls = [];
+	const anthropicJson = {
+		content: [{ type: 'text', text: 'Salut.' }],
+		stop_reason: 'end_turn',
+		usage: { input_tokens: 50, output_tokens: 10 }
+	};
+	const sseWire = anthropicSse([
+		{ type: 'message_start', message: { usage: { input_tokens: 30, output_tokens: 1 } } },
+		{ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Servus' } },
+		{ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 4 } },
+		{ type: 'message_stop' }
+	]);
+	const vertex = createVertexClient({
+		project: PROJECT,
+		getAccessToken: async () => 'sa-token',
+		fetchImpl: async (url, init) => {
+			upstreamCalls.push({ url, body: JSON.parse(init.body) });
+			if (url.includes(':streamRawPredict')) {
+				return {
+					ok: true, status: 200,
+					body: (async function* () { yield Buffer.from(sseWire, 'utf8'); })()
+				};
+			}
+			return { ok: true, status: 200, text: async () => JSON.stringify(anthropicJson) };
+		},
+		maxTokensDefault: 4096
+	});
+	const recorded = [];
+	const meter = {
+		check: async () => ({ allowed: true }),
+		record: async (uid, usage, quotaFactor) => { recorded.push({ uid, usage, quotaFactor }); },
+		snapshot: async () => ({})
+	};
+	const server = createServer({
+		projectId: PROJECT, verify: makeVerifier(), vertex, meter,
+		rateLimitRpm: 100, log: () => { }
+	});
+	await new Promise((resolve) => server.listen(0, resolve));
+	const base = `http://127.0.0.1:${server.address().port}`;
+	const auth = { 'Authorization': `Bearer ${signToken({})}` };
+	const geminiBody = JSON.stringify({
+		systemInstruction: { parts: [{ text: 'Sys' }] },
+		contents: [{ role: 'user', parts: [{ text: 'Hallo' }] }],
+		generationConfig: { temperature: 0.2 }
+	});
+	try {
+		// Nicht-streamend: rawPredict auf dem eu-rep-Host, Antwort im Gemini-Format.
+		const gen = await fetch(`${base}/v1/models/claude-sonnet-5:generateContent`, {
+			method: 'POST', headers: auth, body: geminiBody
+		});
+		assert.strictEqual(gen.status, 200);
+		const genJson = await gen.json();
+		assert.strictEqual(genJson.candidates[0].content.parts[0].text, 'Salut.');
+		assert.strictEqual(genJson.candidates[0].finishReason, 'STOP');
+		assert.deepStrictEqual(genJson.usageMetadata, { promptTokenCount: 50, candidatesTokenCount: 10, totalTokenCount: 60 });
+		assert.strictEqual(
+			upstreamCalls[0].url,
+			`https://aiplatform.eu.rep.googleapis.com/v1/projects/${PROJECT}/locations/eu/publishers/anthropic/models/claude-sonnet-5:rawPredict`
+		);
+		assert.strictEqual(upstreamCalls[0].body.anthropic_version, 'vertex-2023-10-16');
+		assert.strictEqual(upstreamCalls[0].body.model, undefined);
+		assert.strictEqual(upstreamCalls[0].body.max_tokens, 4096);
+		assert.ok(!('temperature' in upstreamCalls[0].body));
+		assert.deepStrictEqual(recorded[0], {
+			uid: 'user-123',
+			usage: { promptTokens: 50, candidateTokens: 10, totalTokens: 60 },
+			quotaFactor: { input: 11, output: 7 }
+		}, 'Metering erhält Tokenzahlen UND den Sonnet-Gewichtungsfaktor');
+
+		// Streamend: streamRawPredict (ohne ?alt=sse), Client sieht Gemini-SSE.
+		const stream = await fetch(`${base}/v1/models/claude-opus-4-8:streamGenerateContent`, {
+			method: 'POST', headers: auth, body: geminiBody
+		});
+		assert.strictEqual(stream.status, 200);
+		assert.ok(String(stream.headers.get('content-type')).startsWith('text/event-stream'));
+		const chunks = [];
+		for await (const chunk of stream.body) { chunks.push(Buffer.from(chunk)); }
+		const collected = collectGeminiSse(chunks);
+		assert.strictEqual(collected.text, 'Servus');
+		assert.strictEqual(collected.finishReason, 'STOP');
+		assert.deepStrictEqual(collected.usageMetadata, { promptTokenCount: 30, candidatesTokenCount: 4, totalTokenCount: 34 });
+		const streamCall = upstreamCalls[upstreamCalls.length - 1];
+		assert.ok(streamCall.url.endsWith(':streamRawPredict'), streamCall.url);
+		assert.ok(!streamCall.url.includes('alt=sse'), 'streamRawPredict liefert nativ SSE');
+		assert.strictEqual(streamCall.body.stream, true);
+		assert.deepStrictEqual(recorded[1].usage, { promptTokens: 30, candidateTokens: 4, totalTokens: 34 });
+		assert.deepStrictEqual(recorded[1].quotaFactor, { input: 18, output: 11 });
+
+		// Opus 4.6 routet auf den regionalen europe-west1-Host.
+		await fetch(`${base}/v1/models/claude-opus-4-6:generateContent`, { method: 'POST', headers: auth, body: geminiBody });
+		assert.ok(upstreamCalls[upstreamCalls.length - 1].url.startsWith('https://europe-west1-aiplatform.googleapis.com/'),
+			upstreamCalls[upstreamCalls.length - 1].url);
+
+		console.log('✔ Claude über HTTP: rawPredict/streamRawPredict-Routing, Format-Übersetzung beidseitig, gewichtetes Metering');
 	} finally {
 		server.close();
 	}
@@ -916,6 +1299,8 @@ async function main() {
 	await testRateLimiterAndScanner();
 	await testMetering();
 	await testMeteringHttp();
+	await testAnthropicTranslator();
+	await testClaudeHttp();
 	await testSessionStore();
 	await testSessionsHttp();
 	await testHttpServer();

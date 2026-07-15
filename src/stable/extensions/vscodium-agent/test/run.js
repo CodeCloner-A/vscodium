@@ -410,6 +410,13 @@ async function testProxyClient() {
 	assert.ok(text.includes('Juli 2026') && text.includes('12.345') && text.includes('2.000.000') && text.includes('1 %'), text);
 	const unlimited = formatUsage({ month: '2026-07', plan: 'pro', limit: 0, totalTokens: 5, requests: 1 });
 	assert.ok(unlimited.includes('kein Limit') && unlimited.includes('pro'), unlimited);
+	// Gewichtete Quote (Proxy v0.5.0+): weightedTokens bestimmt Anzeige und Prozentwert.
+	const weighted = formatUsage({ month: '2026-07', plan: 'free', limit: 2000000, totalTokens: 10000, weightedTokens: 180000, requests: 3 });
+	assert.ok(weighted.includes('180.000') && weighted.includes('gewichteten Tokens') && weighted.includes('9 %'), weighted);
+	// Alter Proxy ohne weightedTokens bzw. reine Faktor-1-Nutzung: unveränderte Anzeige.
+	assert.ok(!text.includes('gewichtet'), 'ohne weightedTokens keine Gewichtungs-Anzeige');
+	const flashOnly = formatUsage({ month: '2026-07', plan: 'free', limit: 2000000, totalTokens: 10000, weightedTokens: 10000, requests: 3 });
+	assert.ok(flashOnly.includes('10.000 von') && !flashOnly.includes('gewichtet'), flashOnly);
 
 	// Harter Anmelde-/Erneuerungsfehler aus getIdToken: KEIN Retry, keine Verschleierung
 	// als „Netzwerkfehler“ – die ursprüngliche Meldung (Anmelde-Hinweis) bleibt erhalten.

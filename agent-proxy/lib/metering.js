@@ -5,7 +5,13 @@
  *   entitlements/{uid}            monthlyTokenLimit (int, 0 = unbegrenzt), plan (string),
  *                                 disabled (bool) – fehlt das Dokument, gilt der Free-Default.
  *   usage/{uid}/months/{YYYY-MM}  promptTokens, candidateTokens, totalTokens, requests,
- *                                 updatedAt – wird per atomarem Increment fortgeschrieben.
+ *                                 weightedTokens, updatedAt – per atomarem Increment.
+ *
+ * Gewichtete Quote: Teure Modelle (Claude Opus ≫ Gemini Flash) zählen mit Faktoren aus
+ * dem Katalog (quotaFactor {input, output}, Basiseinheit gemini-2.5-flash) auf
+ * weightedTokens. Das Quota-Gate prüft max(weightedTokens, totalTokens) – deckt
+ * Monats-Dokumente aus der Zeit vor der Gewichtung korrekt ab (damals nur Faktor-1-
+ * Modelle, weightedTokens fehlt/0) und bleibt korrekt, weil Faktoren nie < 1 sind.
  *
  * Verhalten:
  *   check(uid)     Quota-Gate vor dem Modell-Aufruf. Liest Entitlement + Monatszähler
@@ -136,6 +142,7 @@ function createMeter(options) {
 				promptTokens: intField(usageDoc, 'promptTokens'),
 				candidateTokens: intField(usageDoc, 'candidateTokens'),
 				totalTokens: intField(usageDoc, 'totalTokens'),
+				weightedTokens: intField(usageDoc, 'weightedTokens'),
 				requests: intField(usageDoc, 'requests')
 			},
 			limit: hasCustomLimit ? intField(entitlement, 'monthlyTokenLimit') : freeMonthlyTokens,
@@ -176,10 +183,11 @@ function createMeter(options) {
 		if (state.disabled) {
 			return { allowed: false, status: 403, error: 'Konto gesperrt. Bitte Support kontaktieren.' };
 		}
-		if (state.limit > 0 && state.usage.totalTokens >= state.limit) {
+		const used = Math.max(state.usage.weightedTokens || 0, state.usage.totalTokens || 0);
+		if (state.limit > 0 && used >= state.limit) {
 			return {
 				allowed: false, status: 429, reason: 'quota',
-				error: `Monatskontingent erschöpft (${state.usage.totalTokens} von ${state.limit} Tokens im Monat ${state.month}).`
+				error: `Monatskontingent erschöpft (${used} von ${state.limit} gewichteten Tokens im Monat ${state.month}).`
 			};
 		}
 		return { allowed: true };
@@ -188,9 +196,11 @@ function createMeter(options) {
 	/**
 	 * Zähler fortschreiben (atomare Increments; legt das Monatsdokument bei Bedarf an).
 	 * usage stammt aus usageMetadata der Modell-Antwort und darf fehlen (dann zählt nur
-	 * die Anfrage). Wirft nie – ein Schreibfehler kostet die Zählung, nie die Antwort.
+	 * die Anfrage). quotaFactor ({input, output}, aus dem Katalog) gewichtet die Tokens
+	 * für die Quote; fehlt er, gilt Faktor 1. Wirft nie – ein Schreibfehler kostet die
+	 * Zählung, nie die Antwort.
 	 */
-	async function record(uid, usage) {
+	async function record(uid, usage, quotaFactor) {
 		if (!UID_PATTERN.test(uid)) {
 			log({ severity: 'WARNING', message: 'Metering: ungültige UID, Zählung übersprungen.' });
 			return;
@@ -204,6 +214,16 @@ function createMeter(options) {
 				transforms.push({ fieldPath: field, increment: { integerValue: String(Math.round(value)) } });
 				bump[field] = Math.round(value);
 			}
+		}
+		const factorIn = quotaFactor && Number.isFinite(quotaFactor.input) ? quotaFactor.input : 1;
+		const factorOut = quotaFactor && Number.isFinite(quotaFactor.output) ? quotaFactor.output : 1;
+		// Denk-/Zusatztokens (Gemini: totalTokenCount > prompt+candidates) werden wie
+		// Output bepreist – alles über dem Prompt zählt zum Output-Faktor.
+		const outTokens = Math.max(bump.candidateTokens || 0, (bump.totalTokens || 0) - (bump.promptTokens || 0));
+		const weighted = Math.round((bump.promptTokens || 0) * factorIn + outTokens * factorOut);
+		if (weighted > 0) {
+			transforms.push({ fieldPath: 'weightedTokens', increment: { integerValue: String(weighted) } });
+			bump.weightedTokens = weighted;
 		}
 		transforms.push({ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' });
 		const body = {
@@ -250,14 +270,16 @@ function createMeter(options) {
 		if (!UID_PATTERN.test(uid)) { throw new Error('Ungültige Nutzerkennung.'); }
 		const state = await load(uid);
 		remember(uid, state);
+		const used = Math.max(state.usage.weightedTokens || 0, state.usage.totalTokens || 0);
 		return {
 			month: state.month,
 			plan: state.plan,
 			limit: state.limit,
-			remaining: state.limit > 0 ? Math.max(0, state.limit - state.usage.totalTokens) : null,
+			remaining: state.limit > 0 ? Math.max(0, state.limit - used) : null,
 			promptTokens: state.usage.promptTokens,
 			candidateTokens: state.usage.candidateTokens,
 			totalTokens: state.usage.totalTokens,
+			weightedTokens: used,
 			requests: state.usage.requests
 		};
 	}

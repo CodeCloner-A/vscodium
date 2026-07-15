@@ -49,7 +49,7 @@ Angemeldet synchronisieren sich die Sitzungen zusätzlich **geräteübergreifend
 
 ## Modellwahl
 
-Standard ist `gemini-2.5-flash` (schnell, günstig). Für anspruchsvolle Refactorings lohnt `gemini-2.5-pro` (Einstellung `vscodiumAgent.model`). Die Modellwahl gilt ab der nächsten Aufgabe.
+Standard ist `gemini-2.5-flash` (schnell, günstig). Für anspruchsvolle Refactorings lohnt `gemini-2.5-pro` — oder eines der **Claude-Modelle von Anthropic** (`claude-opus-4-8`, `claude-sonnet-5`, `claude-opus-4-6`), die seit v0.11.0 im Modell-Picker stehen. Die Modellwahl gilt ab der nächsten Aufgabe. Beachte: Claude-Modelle sind deutlich teurer und verbrauchen die Monats-Quote entsprechend schneller (gewichtete Zählung; Opus grob mit Faktor 10–18 gegenüber Gemini Flash).
 
 ## Tastatur-Schnellreferenz
 

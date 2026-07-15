@@ -32,12 +32,18 @@ function formatUsage(usage) {
 		monthLabel = new Date(Date.UTC(Number(parsed[1]), Number(parsed[2]) - 1, 1))
 			.toLocaleDateString('de-DE', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 	}
+	// Seit Proxy v0.5.0 zählt die Quote GEWICHTET (teure Modelle × Faktor). Ältere Proxys
+	// liefern kein weightedTokens – dann gilt wie bisher der Rohwert.
+	const raw = Number(usage.totalTokens) || 0;
+	const weighted = Number(usage.weightedTokens);
+	const used = Number.isFinite(weighted) ? Math.max(weighted, raw) : raw;
+	const isWeighted = used > raw;
 	const suffix = `${de(usage.requests)} Anfragen · Tarif ${usage.plan || 'free'}`;
 	if (!usage.limit || usage.limit <= 0) {
-		return `Verbrauch im ${monthLabel}: ${de(usage.totalTokens)} Tokens (kein Limit) · ${suffix}`;
+		return `Verbrauch im ${monthLabel}: ${de(used)} ${isWeighted ? 'gewichtete Tokens' : 'Tokens'} (kein Limit) · ${suffix}`;
 	}
-	const percent = Math.round((Number(usage.totalTokens) || 0) / usage.limit * 100);
-	return `Verbrauch im ${monthLabel}: ${de(usage.totalTokens)} von ${de(usage.limit)} Tokens (${percent} %) · ${suffix}`;
+	const percent = Math.round(used / usage.limit * 100);
+	return `Verbrauch im ${monthLabel}: ${de(used)} von ${de(usage.limit)} ${isWeighted ? 'gewichteten Tokens' : 'Tokens'} (${percent} %) · ${suffix}`;
 }
 
 function sleep(ms, signal) {

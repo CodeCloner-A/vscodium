@@ -4,6 +4,14 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.11.0] – 2026-07-15
+
+### Hinzugefügt
+- **Claude-Modelle (Proxy v2, Roadmap Phase S):** Der Modell-Picker bietet zusätzlich zu Gemini drei Anthropic-Modelle über Vertex AI MaaS an — `claude-opus-4-8` und `claude-sonnet-5` (EU-Multiregion) sowie `claude-opus-4-6` (europe-west1). Der Client bleibt beim Gemini-Wire-Format; die komplette Format-Übersetzung (Messages-Format, Tool-Use-IDs, SSE-Events, Tokenzählung) übernimmt der Proxy (`agent-proxy/lib/anthropic.js`, Proxy v0.5.0). Chat mit allen 11 Agent-Tools, Inline-Edit und „In Datei übernehmen“ funktionieren unverändert.
+
+### Geändert
+- **Gewichtete Monats-Quote:** Teure Modelle verbrauchen die Quote entsprechend schneller (Faktoren aus den Listenpreisen, Basiseinheit Gemini 2.5 Flash; z. B. Opus-Ausgabetokens ×11). „Agent: Verbrauch anzeigen“ zeigt gewichtete Tokens, sobald der Proxy sie liefert; ältere Proxys zeigen wie bisher Rohtokens.
+
 ## [0.10.0] – 2026-07-13
 
 ### Hinzugefügt

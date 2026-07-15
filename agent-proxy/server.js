@@ -2,9 +2,11 @@
  * VSCodium Agent Proxy – Türsteher zwischen IDE und Vertex AI (Phase S der Roadmap).
  *
  * Aufgaben: Firebase-ID-Token prüfen, Modell-Allowlist + Standort-Routing anwenden,
- * generateContent/streamGenerateContent (SSE) unverändert durchleiten, Tokenzahlen aus
+ * generateContent/streamGenerateContent (SSE) durchleiten – Gemini unverändert, Claude
+ * (Vertex MaaS) mit Format-Übersetzung in lib/anthropic.js –, Tokenzahlen aus
  * usageMetadata pro Nutzer in Firestore fortschreiben und harte Monats-Quoten durchsetzen
- * (lib/metering.js) – ohne jemals Prompt- oder Code-Inhalte zu protokollieren.
+ * (lib/metering.js, gewichtet per quotaFactor aus dem Katalog) – ohne jemals Prompt-
+ * oder Code-Inhalte zu protokollieren.
  *
  * Endpunkte:
  *   GET  /health                                        (ohne Anmeldung; NICHT /healthz –
@@ -163,7 +165,10 @@ function createServer(options) {
 	if (!projectId) { throw new Error('projectId erforderlich.'); }
 	const log = options.log || ((entry) => console.log(JSON.stringify(entry)));
 	const verify = options.verify || createVerifier({ projectId });
-	const vertex = options.vertex || createVertexClient({ project: options.vertexProject || projectId });
+	const vertex = options.vertex || createVertexClient({
+		project: options.vertexProject || projectId,
+		maxTokensDefault: options.anthropicMaxTokens
+	});
 	// Firestore-Metering (meter: null schaltet es bewusst ab, z. B. in Tests).
 	// Die Zähler leben im Firebase-Projekt – dort schaut auch die Firebase Console drauf.
 	const meter = options.meter !== undefined ? options.meter : createMeter({
@@ -362,7 +367,7 @@ function createServer(options) {
 					res.writeHead(upstream.status, { 'Content-Type': 'application/json; charset=utf-8' });
 					res.write(text);
 					const usage = extractUsage(text);
-					if (meter && upstream.ok) { await waitBounded(meter.record(user.uid, usage), 1500); }
+					if (meter && upstream.ok) { await waitBounded(meter.record(user.uid, usage, model.quotaFactor), 1500); }
 					res.end();
 					log({
 						severity: upstream.ok ? 'INFO' : 'WARNING',
@@ -390,7 +395,7 @@ function createServer(options) {
 					// ein Quota-Schlupfloch): mindestens die Anfrage; Tokenzahlen nur, wenn die
 					// usageMetadata (am Stream-Ende) noch ankam. Begrenzt gewartet, damit der
 					// Commit nicht ins Cloud-Run-CPU-Throttling nach dem Antwort-Ende fällt.
-					if (meter) { await waitBounded(meter.record(user.uid, scanner.usage()), 1500); }
+					if (meter) { await waitBounded(meter.record(user.uid, scanner.usage(), model.quotaFactor), 1500); }
 				}
 				res.end();
 				log({
@@ -446,6 +451,8 @@ if (require.main === module) {
 		authRateLimitRpm: parseInt(process.env.AUTH_RATE_LIMIT_RPM || '10', 10),
 		authGlobalRateLimitRpm: parseInt(process.env.AUTH_GLOBAL_RATE_LIMIT_RPM || '100', 10),
 		requestTimeoutSec: parseInt(process.env.REQUEST_TIMEOUT_SEC || '300', 10),
+		// max_tokens-Pflichtfeld für Claude-Requests ohne clientseitiges maxOutputTokens.
+		anthropicMaxTokens: parseInt(process.env.ANTHROPIC_MAX_TOKENS_DEFAULT || '32768', 10),
 		// Monats-Quote pro Nutzer in Tokens; 0 = unbegrenzt (nur zählen). Ein Entitlement-
 		// Dokument in Firestore (entitlements/{uid}.monthlyTokenLimit) übersteuert den Wert.
 		freeMonthlyTokens: parseInt(process.env.FREE_MONTHLY_TOKENS || '2000000', 10)

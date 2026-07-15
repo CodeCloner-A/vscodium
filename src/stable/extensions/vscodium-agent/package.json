@@ -1,8 +1,8 @@
 {
   "name": "vscodium-agent",
   "displayName": "VSCodium Agent",
-  "description": "Integrierter KI-Agent (Gemini über den Agent-Proxy): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
-  "version": "0.10.0",
+  "description": "Integrierter KI-Agent (Gemini & Claude über den Agent-Proxy): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
+  "version": "0.11.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
@@ -163,7 +163,7 @@
         "vscodiumAgent.model": {
           "type": "string",
           "default": "gemini-2.5-flash",
-          "markdownDescription": "Gemini-Modellname, z. B. `gemini-3.5-flash` oder `gemini-2.5-pro`. Bequemer über den Modell-Picker in der Chat-Statusleiste; der Standort wird pro Modell automatisch aufgelöst."
+          "markdownDescription": "Modellname, z. B. `gemini-3.5-flash`, `gemini-2.5-pro` oder `claude-opus-4-8`. Bequemer über den Modell-Picker in der Chat-Statusleiste – das Angebot (Gemini & Claude) bestimmt der Proxy, Standort-Routing inklusive."
         },
         "vscodiumAgent.inlineEdit.model": {
           "type": "string",

@@ -4,9 +4,11 @@ Der Proxy in [`agent-proxy/`](../agent-proxy/) ist das Herzstück des SaaS-Umbau
 Firebase-Auth-ID-Tokens, wendet die Modell-Allowlist mit serverseitigem Standort-Routing an
 (`gemini-3.5-flash` → `eu`-Multiregion mit EU-Datenresidenz via `aiplatform.eu.rep.googleapis.com`,
 2.5-Familie → `europe-west1`) und leitet
-`generateContent`/`streamGenerateContent` (SSE) unverändert an Vertex AI durch. Tokenzahlen
+`generateContent`/`streamGenerateContent` (SSE) an Vertex AI durch — Gemini unverändert,
+**Anthropic Claude** (seit v0.5.0, Vertex MaaS) mit vollständiger Format-Übersetzung
+(siehe unten). Tokenzahlen
 aus `usageMetadata` schreibt er pro Nutzer und Monat nach **Firestore** fort und setzt dort
-harte **Monats-Quoten** durch (zusätzlich strukturierte Logs) — Prompt- und
+harte, **pro Modell gewichtete Monats-Quoten** durch (zusätzlich strukturierte Logs) — Prompt- und
 Code-Inhalte werden nie protokolliert. Seit v0.4.0 synchronisiert er außerdem die
 **Chat-Sitzungen** der IDE (pro Nutzer und Projekt) nach Firestore — dort liegen bewusst
 Inhalte, das ist der Zweck des Features; die Proxy-Logs bleiben auch hier inhaltsfrei.
@@ -95,6 +97,56 @@ Verhalten im Detail:
 - Der Zähl-Commit läuft **vor** dem Antwort-Ende (begrenzt auf 1,5 s), weil Cloud Run
   nach dem Antwort-Ende die CPU drosselt und Hintergrundarbeit sonst verloren ginge.
 
+## Partner-Modelle: Claude via Vertex MaaS (seit v0.5.0)
+
+Der Client spricht ausschließlich das Gemini-Wire-Format — für Claude-Modelle übersetzt
+der Proxy in beide Richtungen (`agent-proxy/lib/anthropic.js`):
+
+| Aspekt | Gemini (Client) | Anthropic (Vertex MaaS) |
+|---|---|---|
+| Endpunkt | `:generateContent` / `:streamGenerateContent` | `publishers/anthropic/models/{id}:rawPredict` / `:streamRawPredict` (nativ SSE, kein `?alt=sse`) |
+| Pflichtfelder | — | `anthropic_version: "vertex-2023-10-16"`, `max_tokens` (Default `ANTHROPIC_MAX_TOKENS_DEFAULT`), kein `model`-Feld |
+| Tool-Aufrufe | `functionCall`/`functionResponse` ohne IDs | `tool_use`/`tool_result` mit synthetischen IDs (Zuordnung per Name/Reihenfolge) |
+| Tool-Schemata | OpenAPI-Subset, Typen GROSS | JSON Schema, Typen klein |
+| SSE | Gemini-Chunks mit `usageMetadata` | `message_start`/`content_block_delta`/… → werden in Gemini-Chunks reframed (Metering & Client unverändert) |
+| stop_reason | `finishReason` | `end_turn`/`tool_use` → `STOP`, `max_tokens` → `MAX_TOKENS`, `refusal` → `SAFETY` |
+
+Bewusste Entscheidungen: `thinking: {type:"disabled"}` wird immer gesetzt (thinking-Blöcke
+wären beim Tool-Roundtrip signaturpflichtig und in der Gemini-Historie nicht verlustfrei
+transportierbar); Sampling-Parameter (`temperature` …) werden nie weitergereicht (auf
+Opus 4.8/Sonnet 5 entfernt, 400). Angebotene Modelle und Standorte stehen im Katalog
+(`lib/catalog.js`): `claude-opus-4-8` und `claude-sonnet-5` über die `eu`-Multiregion,
+`claude-opus-4-6` über `europe-west1`.
+
+**Voraussetzung (einmalig, Konsole):** Die Claude-Modelle müssen im **Vertex AI Model
+Garden** des Projekts aktiviert werden (EULA akzeptieren) — sonst antwortet Vertex mit
+einem Permission-Fehler. Der Service-Account braucht keine neuen Rollen
+(`roles/aiplatform.user` deckt rawPredict ab). Abgerechnet wird pay-as-you-go über das
+verknüpfte Rechnungskonto.
+
+## Gewichtete Monats-Quote (seit v0.5.0)
+
+Teure Modelle verbrauchen die Quote schneller: Jeder Katalog-Eintrag trägt einen
+`quotaFactor {input, output}` relativ zur Basiseinheit **Gemini 2.5 Flash**
+(Input $0,30 / Output $2,50 pro Mio. Tokens); das Metering schreibt zusätzlich zu den
+Rohzählern ein `weightedTokens`-Feld fort (`weighted = prompt×input + candidates×output`),
+und das Quota-Gate prüft `max(weightedTokens, totalTokens)` gegen das Limit (deckt
+Monats-Dokumente aus der Zeit vor der Gewichtung ab; Faktoren nie < 1).
+
+| Modell | Faktor Input | Faktor Output | Herleitung (Preisstand 15.07.2026) |
+|---|---|---|---|
+| gemini-2.5-flash | 1 | 1 | Basiseinheit ($0,30/$2,50) |
+| gemini-2.5-flash-lite | 1 | 1 | billiger als Basis → aufgerundet |
+| gemini-2.5-pro | 4 | 4 | $1,25/$10 |
+| gemini-3.5-flash | 6 | 6 | Input global $1,50 +10 % eu; Output nicht gelistet → wie Input (konservativ) |
+| claude-sonnet-5 | 11 | 7 | $3/$15 (Listenpreis) +10 % eu |
+| claude-opus-4-8 | 18 | 11 | $5/$25 +10 % eu |
+| claude-opus-4-6 | 17 | 10 | $5/$25 (europe-west1, regional ohne Aufschlag) |
+
+Bei Preisänderungen die Faktoren in `lib/catalog.js` nachziehen (Herleitung steht dort
+als Kommentar). `GET /v1/usage` liefert zusätzlich `weightedTokens`; die IDE zeigt den
+gewichteten Verbrauch an.
+
 ## Chat-Sitzungs-Sync (Firestore, seit v0.4.0)
 
 Seit dem BYOK-Rückbau hat die Extension keinen direkten Firebase-Zugang mehr — der Sync
@@ -134,7 +186,8 @@ Verhalten im Detail:
 | `RATE_LIMIT_RPM` | `30` | Anfragen pro Nutzer und Minute (pro Instanz) |
 | `GLOBAL_RATE_LIMIT_RPM` | `300` | Gesamtdeckel aller Nutzer zusammen (pro Instanz) |
 | `REQUEST_TIMEOUT_SEC` | `300` | Upstream-Timeout |
-| `FREE_MONTHLY_TOKENS` | `2000000` | Monats-Quote in Tokens pro Nutzer ohne Entitlement-Dokument; `0` = unbegrenzt (nur zählen) |
+| `FREE_MONTHLY_TOKENS` | `2000000` | Monats-Quote in **gewichteten** Tokens pro Nutzer ohne Entitlement-Dokument; `0` = unbegrenzt (nur zählen) |
+| `ANTHROPIC_MAX_TOKENS_DEFAULT` | `32768` | `max_tokens`-Pflichtfeld für Claude-Requests, wenn der Client kein `maxOutputTokens` setzt |
 | `AUTH_RATE_LIMIT_RPM` | `10` | Anmeldeversuche pro IP und Minute (Auth-Relay) |
 | `AUTH_GLOBAL_RATE_LIMIT_RPM` | `100` | Gesamtdeckel der Auth-Endpunkte (eigener Eimer, damit ein Anmelde-Flood den Modell-Verkehr nicht aussperrt) |
 | `GOOGLE_OAUTH_CLIENT_ID` | — | OAuth-Client (Desktop-App) für das Auth-Relay; ohne alle drei Werte → `/v1/auth/*` antwortet 501 |
@@ -248,7 +301,10 @@ curl -H "Authorization: Bearer <ID_TOKEN>" https://agent-proxy-476281311476.euro
 
 - **Keine Tarife/Abrechnung** (Stripe) — die Entitlement-Dokumente sind vorbereitet
   (`monthlyTokenLimit`, `plan`), werden aber noch von Hand gepflegt.
-- **Nur Gemini** — Claude via MaaS (anderes Wire-Format) kommt mit Proxy v2.
+- **Claude ohne Extended Thinking (v1)** — `thinking` ist bewusst deaktiviert (siehe
+  Partner-Modelle); ebenso kein Prompt-Caching für Claude (`input_tokens` zählt voll).
+- **Quota-Gewichte sind Näherungen** aus Listenpreisen — bei Preisänderungen den
+  Katalog nachziehen.
 - **Rate-Limits pro Instanz**, nicht clusterweit (bei `--max-instances 3` also bis zu 3×);
   die Monats-Quote (Firestore) gilt dagegen instanzübergreifend.
 - **Abgebrochene Streams zählen nicht** ins Kontingent (usageMetadata kommt erst am Ende).

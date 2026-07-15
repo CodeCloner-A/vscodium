@@ -1,6 +1,6 @@
-# VSCodium Agent – Agentische IDE (Gemini über den Agent-Proxy)
+# VSCodium Agent – Agentische IDE (Gemini & Claude über den Agent-Proxy)
 
-Dieser Fork enthält eine Built-in-Extension **`vscodium-agent`**, die VSCodium um einen integrierten KI-Agenten erweitert (vergleichbar mit dem Agent-Ansatz von Cursor/Windsurf/Antigravity). Der Agent spricht **Gemini über den Agent-Proxy** (Cloud Run, siehe `docs/agent-proxy.md`) — Anmeldung per Google-Konto, keinerlei Schlüssel im Client. Der frühere BYOK-Pfad (eigener Firebase-API-Key) wurde mit v0.9.0 entfernt.
+Dieser Fork enthält eine Built-in-Extension **`vscodium-agent`**, die VSCodium um einen integrierten KI-Agenten erweitert (vergleichbar mit dem Agent-Ansatz von Cursor/Windsurf/Antigravity). Der Agent spricht **Gemini und Anthropic Claude über den Agent-Proxy** (Cloud Run, siehe `docs/agent-proxy.md`) — Anmeldung per Google-Konto, keinerlei Schlüssel im Client. Die Claude-Modelle (Opus 4.8, Sonnet 5, Opus 4.6) laufen über Vertex AI MaaS; die Format-Übersetzung übernimmt der Proxy, die Extension bleibt beim Gemini-Wire-Format. Der frühere BYOK-Pfad (eigener Firebase-API-Key) wurde mit v0.9.0 entfernt.
 
 ## Was der Agent kann
 
@@ -33,7 +33,7 @@ Extension fest eingebaut (`lib/saasConfig.js` — vor dem Release eintragen).
 | Einstellung | Default | Bedeutung |
 |---|---|---|
 | `vscodiumAgent.proxy.url` | Cloud-Run-URL | Agent-Proxy: Anmeldung, Modell-Allowlist, Standort-Routing, Metering (siehe `docs/agent-proxy.md`) |
-| `vscodiumAgent.model` | `gemini-2.5-flash` | z. B. `gemini-3.5-flash` (neueste Generation) oder `gemini-2.5-pro` für schwierige Aufgaben; bequem per Dropdown in der Chat-Statusleiste — Standort und Angebot bestimmt der Proxy |
+| `vscodiumAgent.model` | `gemini-2.5-flash` | z. B. `gemini-3.5-flash`, `gemini-2.5-pro` oder `claude-opus-4-8`/`claude-sonnet-5` (Anthropic); bequem per Dropdown in der Chat-Statusleiste — Standort und Angebot bestimmt der Proxy. Achtung: Claude-Modelle verbrauchen die Monats-Quote deutlich schneller (gewichtete Zählung) |
 | `vscodiumAgent.inlineEdit.model` | `gemini-2.5-flash` | Modell für Inline-Edit (Strg+I), Quick-Fixes, „In Datei übernehmen“ |
 | `vscodiumAgent.approvalMode` | `review` | `review` = Diffs bestätigen, `auto` = direkt anwenden |
 | `vscodiumAgent.terminal.mode` | `captured` | `terminal` = Agent-Kommandos sichtbar im „Agent“-Terminal (Shell-Integration nötig) |

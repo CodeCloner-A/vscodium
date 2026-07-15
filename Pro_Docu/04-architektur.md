@@ -35,6 +35,10 @@ Vertex AI. Auch Anmeldung und Token-Erneuerung gehen über den Proxy (Auth-Relay
 die Extension enthält keinerlei Schlüssel, nur die öffentliche OAuth-Client-ID.
 Seit v0.10.0 synchronisiert der Proxy zusätzlich die Chat-Sitzungen nach Firestore
 (`/v1/sessions…`, pro Nutzer und Projekt; `workspaceState` bleibt Offline-Cache).
+Seit v0.11.0 bietet der Proxy neben Gemini auch **Anthropic-Claude-Modelle** an
+(Vertex AI MaaS): Die Extension spricht weiterhin nur das Gemini-Format, der Proxy
+übersetzt Requests, Antworten und SSE-Streams verlustfrei in das Anthropic-
+Messages-Format und zurück (`agent-proxy/lib/anthropic.js`).
 
 ## Der Agent-Loop
 
