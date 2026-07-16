@@ -1,0 +1,5 @@
+{
+    "vscodiumAgent.firebase.backend": "vertexAI",
+    "vscodiumAgent.model": "gemini-3.1-flash-lite",
+    "vscodiumAgent.firebase.location": "global"
+}

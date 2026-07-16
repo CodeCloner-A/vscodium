@@ -28,7 +28,9 @@ class AgentRun {
 	 *   systemPrompt: string,
 	 *   maxIterations?: number,
 	 *   signal?: AbortSignal,
-	 *   history?: Array<object>
+	 *   history?: Array<object>,
+	 *   toolDeclarations?: Array<object>,
+	 *   invokeTool?: (name: string, args: object) => Promise<object>
 	 * }} opts
 	 */
 	constructor(opts) {
@@ -38,6 +40,12 @@ class AgentRun {
 		this.systemPrompt = opts.systemPrompt;
 		this.maxIterations = opts.maxIterations || 24;
 		this.signal = opts.signal;
+		/** Teilmenge der Tools für diesen Lauf (Default: alle). */
+		this.toolDeclarations = Array.isArray(opts.toolDeclarations) ? opts.toolDeclarations : TOOL_DECLARATIONS;
+		/** Austauschbare Tool-Ausführung (nativer Chat routet über vscode.lm.invokeTool). */
+		this.invokeTool = typeof opts.invokeTool === 'function'
+			? opts.invokeTool
+			: (name, args) => executeTool(this.host, name, args);
 		/** Gemini-"contents"-Historie (über Aufgaben hinweg wiederverwendbar). */
 		this.contents = Array.isArray(opts.history) ? opts.history : [];
 		this.filesChanged = new Set();
@@ -62,7 +70,7 @@ class AgentRun {
 				response = await this.client.generateContent({
 					systemInstruction: { role: 'system', parts: [{ text: this.systemPrompt }] },
 					contents: this.contents,
-					tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
+					tools: [{ functionDeclarations: this.toolDeclarations }],
 					toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
 					generationConfig: { temperature: 0.2 }
 				}, this.signal);
@@ -107,7 +115,7 @@ class AgentRun {
 				const id = `tool-${++this.toolCounter}`;
 				this.ui.toolStart(id, name, args || {});
 
-				const result = await executeTool(this.host, name, args || {});
+				const result = await this.invokeTool(name, args || {});
 
 				const ok = !result.error && result.status !== 'rejected' && !result.skipped;
 				this.ui.toolEnd(id, name, summarizeResult(name, args || {}, result), ok);

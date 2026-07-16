@@ -25,6 +25,10 @@ const { signInWithGoogle, refreshIdToken, createPkce, decodeJwtPayload } = requi
 const { AuthManager, AUTH_SECRET_KEY } = require('../lib/authManager');
 const { ProxyClient, formatUsage } = require('../lib/proxyClient');
 const { workspaceKey, validRemoteSession, planSync } = require('../lib/sessionSync');
+const { buildAskRequest, buildAskSystemText, historyToContents, simplifyHistory, lmMessagesToContents, streamAskResponse, MAX_HISTORY_TURNS } = require('../lib/nativeChat');
+const { NATIVE_LM_TOOLS, EDIT_MODE_TOOLS, declarationsForMode, toolsMapToNames, toolConfirmation, toolInvocationMessage, toolResultToText, parseToolResultText, lmResultToText, buildNativeModeNotes } = require('../lib/nativeChat');
+const { TOOL_DECLARATIONS } = require('../lib/tools');
+const manifest = require('../package.json');
 
 // ── Mock-Host (In-Memory-Dateisystem) ──────────────────────────────────────
 
@@ -949,6 +953,209 @@ async function testTerminalHelpers() {
 	console.log('✔ Terminal-Helfer: ANSI-Strip, Freigabe-Normalisierung (editierbare Kommandos)');
 }
 
+async function testNativeChat() {
+	// System-Text: Kontextfelder landen im Prompt, Ask-Modus ändert nichts.
+	const sys = buildAskSystemText({ rootName: 'demo', platform: 'linux', today: '2026-07-15', activity: 'a.js', fileTree: 'a.js\nb.js' });
+	assert.ok(sys.includes('"demo"') && sys.includes('2026-07-15') && sys.includes('a.js\nb.js'));
+	assert.ok(sys.includes('cannot edit files'));
+
+	// Historie → contents: Rollen-Mapping, leere Beiträge fallen weg, Deckel greift.
+	const contents = historyToContents([
+		{ role: 'user', text: 'Frage' },
+		{ role: 'assistant', text: 'Antwort' },
+		{ role: 'user', text: '   ' }
+	]);
+	assert.deepStrictEqual(contents.map(c => c.role), ['user', 'model']);
+	const many = historyToContents(Array.from({ length: 80 }, (_, i) => ({ role: 'user', text: `t${i}` })));
+	assert.strictEqual(many.length, MAX_HISTORY_TURNS);
+	assert.strictEqual(many[many.length - 1].parts[0].text, 't79');
+
+	// Native Turns (Duck-Typing): Request trägt prompt, Response Markdown-Parts.
+	const simplified = simplifyHistory([
+		{ prompt: 'Was macht a.js?' },
+		{ response: [{ value: { value: 'Es ' } }, { value: { value: 'rechnet.' } }, { value: 42 }] },
+		{ response: [] },
+		null
+	]);
+	assert.deepStrictEqual(simplified, [
+		{ role: 'user', text: 'Was macht a.js?' },
+		{ role: 'assistant', text: 'Es rechnet.' }
+	]);
+
+	// LM-API-Nachrichten: Rolle 2 = Assistant → model, Text-Parts konkateniert.
+	const lm = lmMessagesToContents([
+		{ role: 1, content: [{ value: 'Hallo' }] },
+		{ role: 2, content: [{ value: 'Hi, ' }, { value: 'was gibt es?' }] },
+		{ role: 1, content: [{ nichtText: true }] }
+	]);
+	assert.deepStrictEqual(lm, [
+		{ role: 'user', parts: [{ text: 'Hallo' }] },
+		{ role: 'model', parts: [{ text: 'Hi, was gibt es?' }] }
+	]);
+
+	// Kompletter Ask-Request: System-Instruction + Historie + aktuelle Frage.
+	const req = buildAskRequest({ rootName: 'demo' }, [{ role: 'user', text: 'alt' }, { role: 'assistant', text: 'ok' }], 'neu?');
+	assert.ok(req.systemInstruction.parts[0].text.includes('"demo"'));
+	assert.strictEqual(req.contents.length, 3);
+	assert.deepStrictEqual(req.contents[2], { role: 'user', parts: [{ text: 'neu?' }] });
+
+	// Streaming: Fragmente + Nachzügler aus der zusammengeführten Antwort.
+	const collected = [];
+	const streamingClient = {
+		async generateContentStream(_req, _signal, onText) {
+			onText('Hal');
+			onText('lo');
+			return { candidates: [{ content: { role: 'model', parts: [{ text: 'Hallo Welt' }] }, finishReason: 'STOP' }] };
+		}
+	};
+	const full = await streamAskResponse(streamingClient, req, undefined, (t) => collected.push(t));
+	assert.strictEqual(full, 'Hallo Welt');
+	assert.strictEqual(collected.join(''), 'Hallo Welt');
+
+	// Fallback ohne Streaming-Methode (z. B. Mocks): eine Emission, gleicher Text.
+	const plain = [];
+	const plainClient = {
+		async generateContent() {
+			return { candidates: [{ content: { role: 'model', parts: [{ text: 'Nur einmal' }] }, finishReason: 'STOP' }] };
+		}
+	};
+	const fullPlain = await streamAskResponse(plainClient, req, undefined, (t) => plain.push(t));
+	assert.strictEqual(fullPlain, 'Nur einmal');
+	assert.deepStrictEqual(plain, ['Nur einmal']);
+
+	console.log('✔ Nativer Chat: System-Text, Historien-Mapping (nativ + LM-API), Ask-Request, Streaming + Fallback');
+}
+
+async function testNativeAgentMode() {
+	// Deklarations-Filter: Agent-Modus ohne Picker-Auswahl → alle Tools.
+	const allNames = TOOL_DECLARATIONS.map(d => d.name);
+	assert.deepStrictEqual(declarationsForMode('agent', undefined).map(d => d.name), allNames);
+
+	// Vom Nutzer abgewählte Tools fallen weg; task_complete ist nicht abwählbar.
+	const filtered = declarationsForMode('agent', { run_command: false, task_complete: false }).map(d => d.name);
+	assert.ok(!filtered.includes('run_command'));
+	assert.ok(filtered.includes('task_complete'));
+	assert.strictEqual(filtered.length, allNames.length - 1);
+
+	// Edit-Modus: nur die Edit-Teilmenge (keine Kommandos, kein Löschen, keine Aktivität).
+	const editNames = declarationsForMode('edit', undefined).map(d => d.name);
+	assert.deepStrictEqual(new Set(editNames), EDIT_MODE_TOOLS);
+	assert.ok(!editNames.includes('run_command') && !editNames.includes('delete_file') && !editNames.includes('get_recent_activity'));
+	assert.ok(!declarationsForMode('edit', { write_file: false }).some(d => d.name === 'write_file'));
+
+	// request.tools (Map<Info, boolean>) → { name: boolean }; Nicht-Maps sind harmlos.
+	const toolsMap = new Map([
+		[{ name: 'run_command' }, false],
+		[{ name: 'read_file' }, true],
+		[{ kaputt: true }, true]
+	]);
+	assert.deepStrictEqual(toolsMapToNames(toolsMap), { run_command: false, read_file: true });
+	assert.deepStrictEqual(toolsMapToNames(undefined), {});
+
+	// Freigabe-Metadaten: Review verlangt Bestätigung für eingreifende Tools, sonst nie.
+	const conf = toolConfirmation('write_file', { path: 'a.js', summary: 'Fix' }, 'review');
+	assert.ok(conf && conf.title.includes('a.js') && conf.message === 'Fix');
+	const cmd = toolConfirmation('run_command', { command: 'npm test', purpose: 'Tests' }, 'review');
+	assert.ok(cmd && cmd.message.includes('npm test') && cmd.message.includes('Tests'));
+	assert.strictEqual(toolConfirmation('read_file', { path: 'a.js' }, 'review'), null);
+	assert.strictEqual(toolConfirmation('run_command', { command: 'npm test' }, 'auto'), null);
+
+	// Invocation-Meldungen: kompakt, mit Kontext, lange Kommandos gekürzt.
+	assert.ok(toolInvocationMessage('read_file', { path: 'src/x.ts' }).includes('src/x.ts'));
+	const longCmd = toolInvocationMessage('run_command', { command: 'x'.repeat(200) });
+	assert.ok(longCmd.length < 120 && longCmd.endsWith('…'));
+
+	// Ergebnis-Roundtrip Loop → LanguageModelToolResult → Loop.
+	const result = { status: 'applied', changeId: 'c1' };
+	assert.deepStrictEqual(parseToolResultText(toolResultToText(result)), result);
+	assert.deepStrictEqual(parseToolResultText(''), {});
+	assert.deepStrictEqual(parseToolResultText('kein json'), { output: 'kein json' });
+	assert.deepStrictEqual(parseToolResultText('42'), { output: 42 });
+	assert.strictEqual(lmResultToText({ content: [{ value: '{"a"' }, { value: ':1}' }, { andere: true }] }), '{"a":1}');
+
+	// Modus-Regeln für den System-Prompt.
+	const editNotes = buildNativeModeNotes('edit');
+	assert.ok(editNotes.includes('EDIT mode') && editNotes.includes('NOT run commands'));
+	const agentNotes = buildNativeModeNotes('agent');
+	assert.ok(agentNotes.includes('pending changes') && !agentNotes.includes('EDIT mode'));
+
+	// Manifest ↔ Deklarationen: languageModelTools und TOOL_DECLARATIONS bleiben synchron.
+	const manifestTools = new Map((manifest.contributes.languageModelTools || []).map(t => [t.name, t]));
+	assert.deepStrictEqual([...manifestTools.keys()].sort(), [...NATIVE_LM_TOOLS].sort(), 'Manifest-Tools ≠ NATIVE_LM_TOOLS');
+	const typeMap = { OBJECT: 'object', STRING: 'string', INTEGER: 'integer', BOOLEAN: 'boolean', NUMBER: 'number' };
+	for (const decl of TOOL_DECLARATIONS) {
+		if (decl.name === 'task_complete') {
+			assert.ok(!manifestTools.has(decl.name), 'task_complete gehört nicht ins Manifest');
+			continue;
+		}
+		const m = manifestTools.get(decl.name);
+		assert.ok(m, `Tool fehlt im Manifest: ${decl.name}`);
+		assert.strictEqual(m.modelDescription, decl.description, `modelDescription weicht ab: ${decl.name}`);
+		assert.strictEqual(m.inputSchema.type, typeMap[decl.parameters.type], `Schema-Typ weicht ab: ${decl.name}`);
+		const declProps = decl.parameters.properties || {};
+		const schemaProps = m.inputSchema.properties || {};
+		assert.deepStrictEqual(Object.keys(schemaProps).sort(), Object.keys(declProps).sort(), `Properties weichen ab: ${decl.name}`);
+		for (const [prop, spec] of Object.entries(declProps)) {
+			assert.strictEqual(schemaProps[prop].type, typeMap[spec.type], `Typ weicht ab: ${decl.name}.${prop}`);
+		}
+		assert.deepStrictEqual(m.inputSchema.required || [], decl.parameters.required || [], `required weicht ab: ${decl.name}`);
+		assert.ok(m.displayName && m.userDescription, `displayName/userDescription fehlt: ${decl.name}`);
+	}
+
+	// Drei Default-Participants, einer pro Modus (Muster der Core-Setup-Agents).
+	const participants = manifest.contributes.chatParticipants;
+	assert.deepStrictEqual(
+		participants.map(p => [p.id, p.isDefault, ...(p.modes || [])]),
+		[
+			['vscodium-agent.default', true, 'ask'],
+			['vscodium-agent.edit', true, 'edit'],
+			['vscodium-agent.agent', true, 'agent']
+		]
+	);
+	assert.ok(manifest.enabledApiProposals.includes('chatParticipantAdditions'), 'chatParticipantAdditions fehlt in enabledApiProposals');
+
+	// Loop mit injizierter Tool-Ausführung: gefilterte Deklarationen gehen ans Modell,
+	// Ergebnisse fließen als functionResponse zurück, Ablehnung ist kein Fehler.
+	const invoked = [];
+	const client = scriptedClient([
+		[fc('write_file', { path: 'a.js', content: 'x', summary: 'Neu' })],
+		[fc('run_command', { command: 'npm test', purpose: 'Tests' })],
+		[fc('task_complete', { summary: 'Fertig.' })]
+	]);
+	const ui = collectorUi();
+	const run = new AgentRun({
+		client,
+		host: {}, // darf nie berührt werden – invokeTool ist injiziert
+		ui,
+		systemPrompt: 'test',
+		toolDeclarations: declarationsForMode('agent', { get_recent_activity: false }),
+		invokeTool: async (name, args) => {
+			invoked.push(name);
+			if (name === 'task_complete') { return { acknowledged: true }; }
+			if (name === 'run_command') { return { skipped: true, status: 'rejected', message: 'Vom Benutzer abgelehnt.' }; }
+			// Simulierter Weg über LanguageModelToolResult (JSON-Text-Roundtrip).
+			return parseToolResultText(lmResultToText({ content: [{ value: toolResultToText({ status: 'applied', args }) }] }));
+		}
+	});
+	const outcome = await run.run('Leg a.js an und teste.');
+	assert.strictEqual(outcome.status, 'completed');
+	assert.strictEqual(outcome.summary, 'Fertig.');
+	assert.deepStrictEqual(invoked, ['write_file', 'run_command', 'task_complete']);
+	// Modell sah nur die gefilterten Deklarationen.
+	const sentNames = client.requests[0].tools[0].functionDeclarations.map(d => d.name);
+	assert.ok(!sentNames.includes('get_recent_activity') && sentNames.includes('write_file'));
+	// write_file zählt als geänderte Datei (status: applied), die Ablehnung als nicht-ok.
+	assert.ok(run.filesChanged.has('a.js'));
+	const cmdEnd = ui.events.find(e => e[0] === 'end' && e[1] === 'run_command');
+	assert.strictEqual(cmdEnd[2], false);
+	// functionResponse der Ablehnung trägt die Botschaft für das Modell.
+	const responseTurn = run.contents.find(c => c.role === 'user' && c.parts.some(p => p.functionResponse && p.functionResponse.name === 'run_command'));
+	const fr = responseTurn.parts.find(p => p.functionResponse && p.functionResponse.name === 'run_command').functionResponse.response;
+	assert.strictEqual(fr.status, 'rejected');
+
+	console.log('✔ Nativer Agent-Modus: Deklarations-Filter, Freigabe-Metadaten, Ergebnis-Roundtrip, Manifest-Sync, Loop mit injizierten Tools');
+}
+
 async function main() {
 	await testToolBasics();
 	await testReplaceUniqueness();
@@ -966,6 +1173,8 @@ async function main() {
 	await testSseStreaming();
 	await testLineDiff();
 	await testTerminalHelpers();
+	await testNativeChat();
+	await testNativeAgentMode();
 	console.log('\nAlle Tests bestanden.');
 }
 

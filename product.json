@@ -461,6 +461,10 @@
       "resolvers",
       "contribRemoteHelp",
       "contribViewsRemote"
+    ],
+    "vscodium.vscodium-agent": [
+      "defaultChatParticipant",
+      "chatParticipantAdditions"
     ]
   },
   "extensionKind": {

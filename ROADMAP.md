@@ -1,10 +1,12 @@
 # Roadmap — VSCodium Agent
 
-Abgeleitet aus der Feature-Chronologie von Cursor (Changelog 2023–2025), gemappt auf den Ist-Zustand dieses Forks (Stand: 15. Juli 2026, Extension v0.11.0, Basis VS Code 1.121.0). Cursor-Referenzen in Klammern zeigen, wann Cursor das jeweilige Feature gebaut hat — als Beleg für die Reihenfolge, nicht als Kopiervorlage.
+Abgeleitet aus der Feature-Chronologie von Cursor (Changelog 2023–2025), gemappt auf den Ist-Zustand dieses Forks (Stand: 15. Juli 2026, Extension v0.13.0, Basis VS Code 1.121.0). Cursor-Referenzen in Klammern zeigen, wann Cursor das jeweilige Feature gebaut hat — als Beleg für die Reihenfolge, nicht als Kopiervorlage.
 
 > **Kurswechsel 07/2026 — SaaS:** Der Fork wird als Dienst betrieben. Firebase bleibt das Rückgrat: Auth für den Login, Firestore für Chatverläufe, Nutzerdaten, Tarife und Metering. Nur die KI-Kommunikation läuft über einen Cloud-Run-Proxy als Türsteher (Vertex AI direkt: Gemini plus Claude via MaaS, SSE-Streaming). Der bisherige API-Key-Pfad (BYOK) entfällt ersatzlos, sobald der Proxy produktiv ist. Die früheren Leitplanken „Kein Login-Zwang“ und „kein SaaS-Modell“ sind damit bewusst aufgehoben — siehe Phase S.
 
-**Zeitschätzungen** gehen von einem Entwickler mit KI-Unterstützung aus. Die Phasen sind sequenziell gedacht, Phase S schiebt sich vor Phase 2; der Infrastruktur-Track läuft parallel.
+> **Richtungsentscheid 07/2026 — Core-Integration (Phase K):** VS Code 1.121 enthält die komplette Chat/Agent-Oberfläche bereits im Workbench-Core; unser Build entfernt bisher nur die Copilot-Extension und lässt die Core-UI deaktiviert, während das eigene Webview sie nachbaut. Ab Phase K wird die Core-UI übernommen und gebrandet; die Built-in-Extension bleibt als Motor dahinter und hängt sich als Default-ChatParticipant ein. *(Korrektur 15.07.2026 nach Quellcode-Verifikation: Der ursprünglich geplante `defaultChatAgent`-Eintrag in product.json entfällt bewusst — ohne ihn bleibt Microsofts Copilot-förmiger Setup-/Entitlement-Apparat komplett inaktiv, und die Chat-View erscheint trotzdem, weil der Default-Participant den Kontextschlüssel `panelParticipantRegistered` setzt.)* Webview-Chat, eigener Diff-/Review-Mechanismus und Inline-Edit-Controller entfallen nach Paritätsnachweis.
+
+**Zeitschätzungen** gehen von einem Entwickler mit KI-Unterstützung aus. Die Phasen sind sequenziell gedacht, Phase S schiebt sich vor Phase 2 und Phase K zwischen S und 2 (parallel zu den offenen S-Restpunkten startbar); der Infrastruktur-Track läuft parallel.
 
 ---
 
@@ -32,6 +34,7 @@ Abgeleitet aus der Feature-Chronologie von Cursor (Changelog 2023–2025), gemap
 | Modell-Picker in der Chat-Statusleiste | ✅ v0.4.0 (`ui/chatViewProvider.js`) |
 | 16 Settings, SecretStorage, `testConnection` | ✅ |
 | Headless-Test | ✅ lokal + CI (`.github/workflows/extension-test.yml`) |
+| Nativer Core-Chat: Default-Participants für ask/edit/agent, 9 Tools als LanguageModelTools mit Core-Freigaben, Edits ins native Multi-File-Review, Server-Katalog im nativen Modell-Picker | ✅ v0.12.0–v0.13.0 (`ui/nativeChatController.js`, `ui/nativeTools.js`, `lib/nativeChat.js`, Patch 85) |
 
 Damit ist der Fork agent-first — Cursor erreichte vergleichbare Agent-Fähigkeiten erst Ende 2024 (0.43/0.44). Was fehlt, sind die Komfort- und Kontext-Schichten, die Cursor 2023 zuerst gebaut hat. Genau die adressieren Phasen 2–3 — nach dem SaaS-Fundament (Phase S).
 
@@ -44,13 +47,14 @@ Damit ist der Fork agent-first — Cursor erreichte vergleichbare Agent-Fähigke
 | 0 | Fundament härten | 2–3 Wochen | ✅ abgeschlossen (esbuild bewusst zurückgestellt) |
 | 1 | Editor-Integration (Inline-Edit, Fix-Flows) | 4–6 Wochen | ✅ abgeschlossen (v0.4.0) |
 | **S** | **SaaS-Fundament (Auth, Proxy, Abrechnung)** | 6–8 Wochen | in Arbeit — 8/11 erledigt (Modell-Katalog v0.5.0, Proxy v1, Auth-Login v0.6.0, Proxy-Verkehr v0.7.0, Metering & Quoten v0.8.0, BYOK-Rückbau + Auth-Relay v0.9.0, Chat-Sync v0.10.0, Claude/Proxy v2 v0.11.0) |
-| 2 | Kontext-System (@-Mentions, Indexing, Ignore) | 6–8 Wochen | offen — setzt Phase S voraus |
+| **K** | **Core-Integration: native Chat-UI statt Webview** | 4–6 Wochen | in Arbeit — Verdrahtung + Motor ✅ (v0.12.0/v0.13.0: alle 3 Modi, 9 Tools nativ, Multi-File-Review); offen: Review-Parität (echter Build), Chat-Sync, Produkt-Identität, Webview-Rückbau |
+| 2 | Kontext-System (@-Mentions, Indexing, Ignore) | 6–8 Wochen | offen — setzt Phase S voraus; UI-Anteile kommen nach Phase K aus dem Core-Chat |
 | 3 | Regeln & Steuerung (Rules, Modi, Modell-Picker) | 3–4 Wochen | Modell-Picker vorgezogen (v0.4.0), Rest offen |
 | 4 | Agent-Ausbau (Checkpoints, Queue, MCP) | 6–8 Wochen | offen |
 | 5 | Multimodal & Docs (Bilder, @docs) | 3–4 Wochen | offen |
 | ∞ | Infrastruktur-Track (parallel) | laufend | laufend |
 
-Gesamt bis Ende Phase 5: grob **7–9 Monate**, davon Phasen 0–1 bereits abgeschlossen. Phase S geht vor Phase 2: Das Kontext-System (Embeddings) baut auf dem Proxy auf.
+Gesamt bis Ende Phase 5: grob **7–9 Monate**, davon Phasen 0–1 bereits abgeschlossen. Phase S geht vor Phase 2: Das Kontext-System (Embeddings) baut auf dem Proxy auf. Phase K ist netto annähernd aufwandsneutral: 4–6 Wochen Umbau, dafür entfallen Eigenbau-Anteile in Phase 2 (@-Mentions, Slash-Commands, Kontext-Chips) und Phase 4 (Checkpoints, Queue, To-do-Anzeige).
 
 ---
 
@@ -95,9 +99,39 @@ Beides löst ein schlankes Proxy-Backend, das Vertex AI direkt spricht. Firebase
 - [ ] **Rechtliches:** AGB, Datenschutzerklärung (Auftragsverarbeitung Google Cloud, Zahlungsdaten Stripe), Impressum; aus der App verlinkt.
 - [x] **BYOK-Rückbau + Auth-Relay:** Kommandos `setApiKey`/`clearApiKey` entfernt, `testConnection` auf Proxy-Ping umgestellt, Settings `firebase.*` und `auth.googleClientId/-Secret` ausgebaut, gespeicherter Key wird beim Start aus der SecretStorage gelöscht. Vorgezogen (Nutzer-Entscheid: kein BYOK-Fallback) und erweitert um das **Auth-Relay**: Anmeldung (`signInWithIdp`) und Token-Refresh laufen über den Proxy (`POST /v1/auth/exchange|refresh`, per-IP-Rate-Limit) — OAuth-Client-Secret und Firebase-Web-API-Key liegen NUR noch in Secret-Manager-Env-Vars des Proxys, im Client verbleibt die öffentliche OAuth-Client-ID (`lib/saasConfig.js`; Wert vor dem Release eintragen). Bestehende Anmeldungen überleben das Update. *(07/2026, Extension v0.9.0 + Proxy v0.3.0: `agent-proxy/lib/authRelay.js`, `lib/firebaseClient.js` auf Format-Helfer eingedampft, `resolveRoute` entfällt clientseitig; Headless-Tests beidseitig. Manuell nachziehen: Secrets anlegen + deployen, Web-API-Key in der GCP-Konsole auf die Identity-Toolkit-API beschränken.)*
 
+## Phase K — Core-Integration: native Chat-UI (4–6 Wochen)
+
+Richtungsentscheid 15.07.2026, Befund aus der Fork-Analyse: Die Basis VS Code 1.121 bringt die komplette Chat/Agent-Oberfläche im Workbench-Core mit (`src/vs/workbench/contrib/chat` — Chat-Sidebar, Agent-Mode mit Tool-Freigaben, Inline-Chat, Chat-Editing mit Multi-File-Review, Modell-Picker, @/#-Kontext, Slash-Commands, Checkpoints). Unser Build entfernt davon nur die gebündelte Copilot-Extension (Patches 51/52) und lässt die Core-UI deaktiviert (`chat.disableAIFeatures`, kein `defaultChatAgent` in product.json) — während das eigene Webview genau diese Oberfläche nachbaut. Phase K dreht das um: Core-UI übernehmen und branden; die Built-in-Extension wird vom UI-Träger zum Motor dahinter — eingehängt als Default-ChatParticipant; Microsofts `defaultChatAgent`-Apparat (Setup, Entitlements, Sign-in) bleibt bewusst ungenutzt und damit inaktiv (Befund v0.12.0, Belege in `docs/phase-k-verdrahtung.md`). Die Motor-Schicht (Agent-Loop, Tools, Proxy, Auth, Metering, Firestore) bleibt unverändert.
+
+**Migrationszuordnung** (bleibt / wird ersetzt / braucht Patch):
+
+| Baustein heute | Phase K |
+|---|---|
+| Agent-Loop (`lib/agentController.js`), 10 Tools (`lib/tools.js`) | **bleibt** — Tools zusätzlich als `LanguageModelTool`s registriert, Freigaben über den Core-Approval-Flow |
+| `lib/proxyClient.js`, Auth (`lib/firebaseAuth.js`, `lib/authManager.js`), Modell-Katalog | **bleibt** — Katalog speist einen `LanguageModelChatProvider`, Modelle erscheinen im nativen Picker |
+| Cloud-Run-Proxy `agent-proxy/` (Vertex, Auth-Relay, Metering, Sessions) | **bleibt unverändert** |
+| Frecency-Index (`lib/activityIndex.js`) | **bleibt** — Kontextquelle für Chat-Requests |
+| Chat-Webview (`ui/chatViewProvider.js`, `media/chat.*`, eigener viewsContainer) | **wird ersetzt** — `ChatParticipant` (default) in der nativen Chat-View |
+| Review-Modus (`lib/workspaceHost.js`: Freigabe-Karten, `vscodium-agent-diff`-Schema) | **wird ersetzt** — natives Chat-Editing (Multi-File-Review, Accept/Reject im Editor); die Produktentscheidungen (Freigabe pro Änderung, Hunk-weises Annehmen, editierbare Kommandos) werden Abnahmekriterien |
+| Inline-Edit (`ui/inlineEditController.js`, CodeLens-Hunks aus `lib/lineDiff.js`) | **wird ersetzt** — nativer Inline-Chat auf Strg+I; `inlineEdit.model`-Zuordnung bleibt |
+| Code-Actions (`ui/codeActions.js`), Terminal-Debug | **bleibt** — Ziel wechselt vom Webview auf native Chat-/Inline-Chat-Kommandos |
+| Chat-Sync (`lib/sessionSync.js` ↔ Firestore) | **bleibt, wird angepasst** — muss an die Core-Chat-Sessions andocken; größtes technisches Risiko der Phase |
+| product.json, `patches/` | **braucht Patch** — siehe Arbeitspakete |
+
+- [x] **product.json verdrahten:** Gegen den 1.121-Quellcode verifiziert — und dabei die Annahme korrigiert: `defaultChatAgent` bleibt bewusst WEG. Das Interface ist Copilot-förmig (Entitlement-URLs, Sign-in-Provider, Quota-Kontexte); ohne den Eintrag bricht der gesamte Setup-/Entitlement-Apparat früh ab (`chatEntitlementService.ts:411`) und muss nicht entbrandet werden, während die Chat-View über `panelParticipantRegistered` (gesetzt durch unseren Default-Participant) sichtbar wird. Nötig ist nur `extensionEnabledApiProposals["vscodium.vscodium-agent"] = ["defaultChatParticipant"]`; `trustedExtensionAuthAccess` entfällt (eigene Auth nutzt keine VS-Code-Auth-Provider). *(07/2026: umgesetzt; Belege mit Datei:Zeile in `docs/phase-k-verdrahtung.md`.)*
+- [ ] **Chat-UI aktivieren + entbranden (Patches):** `chat.disableAIFeatures`-Default kippen; Copilot-Removal-Patches (51/52) bleiben — sie entfernen nur die MS-Extension, nicht die UI; verbleibende Copilot-Strings (z. B. Beschreibung von `chat.disableAIFeatures`) aufs eigene Branding umschreiben. *(07/2026: Aktivierung umgesetzt — `patches/85-chat-enable-native-agent.patch` kippt nur den von VSCodiums 00er-Patch gesetzten Default zurück auf `false`, alle Abschalt-Guards bleiben funktional; Reihenfolge 00 → 85 gegen 1.121 per `git apply` verifiziert. Der befürchtete „heikelste Teil“ ist durch den Minimalpfad ohne `defaultChatAgent` weitgehend entfallen: Setup-/Entitlement-Flows bleiben inaktiv, offen ist nur String-Kosmetik.)*
+- [x] **Extension als Motor:** `ChatParticipant` (default) implementieren — der Agent-Loop bedient Chat-Requests inkl. Tool-Calls und SSE-Streaming; `LanguageModelChatProvider` über den ProxyClient (Server-Katalog → nativer Modell-Picker); die 10 Tools als `LanguageModelTool`s mit Freigabe-Metadaten. *(07/2026, v0.12.0 — erster Schritt: Default-Participant im Ask-Modus + `LanguageModelChatProvider` (stabile API) in `ui/nativeChatController.js`, Kernlogik headless getestet in `lib/nativeChat.js`; Feature-Detection hält fremde Basen sauber.)* *(v0.13.0 — zweiter Schritt: alle drei Modi über je einen Default-Participant (der Modus steht nicht im Request — Muster der Core-Setup-Agents, Beleg in `docs/phase-k-verdrahtung.md`); 9 Tools als `languageModelTools` + `lm.registerTool` (`ui/nativeTools.js`), Freigaben über `prepareInvocation.confirmationMessages` (Review) bzw. durchgewinkt (Auto), Ablehnung → „abgelehnt“ ans Modell; Edits als `textEdit`-/`workspaceEdit`-Parts ins native Chat-Editing (Proposal `chatParticipantAdditions` in package.json + product.json); Edit-Modus mit Tool-Teilmenge ohne Kommandos/Löschen; nativer Tool-Picker filtert die Deklarationen. Bewusste Grenzen: Tool-Verkehr alter Runden wird nicht rekonstruiert (wartet auf Chat-Sync-Andockung), Loop-Antworten streamen pro Modellschritt statt SSE-feingranular.)*
+- [ ] **Review-Parität nachweisen:** Chat-Editing gegen die heutigen Abnahmekriterien testen (Freigabe pro Änderung, Hunk-weises Annehmen, editierbares Kommando vor Ausführung, sichtbares Agent-Terminal); `approvalMode: auto` auf die Core-Auto-Approve-Einstellungen mappen. Lücken zuerst per Konfiguration schließen, erst dann per Patch.
+- [ ] **Chat-Sync andocken:** Firestore-Sync (`/v1/sessions`) auf Core-Chat-Sessions umstellen (Session-Serialisierung bzw. Session-Provider-Proposal in 1.121 prüfen); Migration der Bestandssitzungen aus dem `workspaceState`-Cache.
+- [ ] **Produkt-Identität:** Default-Layout mit sichtbarem Chat (Secondary Sidebar), eigene Welcome-/Walkthrough-Seite statt deaktiviertem Onboarding (Patches 80/81 anpassen), Keybindings (Strg+L Chat-Fokus u. ä.), Erststart mit Login-Aufforderung.
+- [ ] **Webview-Rückbau:** `ui/chatViewProvider.js`, `media/chat.*`, eigener viewsContainer und `vscodium-agent-diff`-Schema entfernen; Kommandos/Settings auf die neuen Ziele mappen; Headless-Tests umziehen. Bis zum Paritätsnachweis bleibt das Webview hinter einem Feature-Flag als Fallback.
+- [ ] **Exit-Kriterium:** Ein Build ohne Webview, in dem Chat, Agent-Mode mit allen 10 Tools, natives Multi-File-Review und Inline-Chat unter eigenem Branding laufen — und eine Upstream-Merge-Probe auf ein neueres 1.12x-Tag einmal durchexerziert ist.
+
+Risiken: Die Chat-Proposed-APIs sind der volatilste Teil von VS Code — Signaturen ändern sich zwischen Tags, deshalb pro Upstream-Merge zuerst die Proposals diffen. Teile des Core-Chat-Setups sind Copilot-förmig (Entitlements, Sign-in) und müssen vollständig neutralisiert werden, sonst wirkt das Produkt halbfertig. Der Chat-Sync ist der einzige Baustein, dessen Datenmodell sich ändert.
+
 ## Phase 2 — Kontext-System (6–8 Wochen)
 
-Cursors eigentlicher Differenzierer war nie das Modell, sondern der Kontextaufbau (0.2.26 bis 0.12, Juni–Okt 2023). Setzt Phase S voraus: Embeddings laufen über den Proxy.
+Cursors eigentlicher Differenzierer war nie das Modell, sondern der Kontextaufbau (0.2.26 bis 0.12, Juni–Okt 2023). Setzt Phase S voraus: Embeddings laufen über den Proxy. Nach Phase K liefert die native Chat-UI @-Mentions, Kontext-Chips und Slash-Commands mit — hier verbleiben Datenquellen und Backend: Indexing, `.agentignore`, `semantic_search`.
 
 - [ ] **@-Mentions im Chat:** `@file`, `@folder` (0.16.4), später `@git` (0.12). Gepinnter Kontext ergänzt den automatischen Aktivitätsindex.
 - [ ] **Kontext-Transparenz:** Chips an jeder Nachricht, die zeigen, was das Modell gesehen hat (0.9.0, 0.35) — passt zur Review-Philosophie des Projekts.
@@ -116,7 +150,7 @@ Cursors eigentlicher Differenzierer war nie das Modell, sondern der Kontextaufba
 
 ## Phase 4 — Agent-Ausbau (6–8 Wochen)
 
-Cursors Agent-Reifung (0.43–1.2, Ende 2024–Mitte 2025) — hier hat der Fork Vorsprung, es geht um Robustheit.
+Cursors Agent-Reifung (0.43–1.2, Ende 2024–Mitte 2025) — hier hat der Fork Vorsprung, es geht um Robustheit. Nach Phase K decken die Core-Chat-Funktionen Checkpoints, To-do-Anzeige und Nachrichten-Queue bereits ab — diese Punkte schrumpfen auf Prüfen/Konfigurieren.
 
 - [ ] **Checkpoints & Rollback:** Snapshot vor jeder Agent-Änderungsserie, Wiederherstellung über den Papierkorb hinaus; Checkpoints überleben Reload (0.44).
 - [ ] **To-do-Planung sichtbar im Chat:** Agent zerlegt Aufgaben in eine live aktualisierte Liste (1.2) — ergänzt den vorhandenen Drift-Schutz.
@@ -136,7 +170,7 @@ Cursors Agent-Reifung (0.43–1.2, Ende 2024–Mitte 2025) — hier hat der Fork
 
 ## Infrastruktur-Track (parallel, laufend)
 
-- [ ] **Upstream-Merge-Kadenz:** Alle 1–2 Monate auf das neueste VS-Code-Tag rebasen (Cursor: 1.79 → 1.83 → … im 1–2-Monats-Takt). Treiber: Extension-API-Kompatibilität und Upstream-CVEs (vgl. CVE-2024-43601 bei Cursor). Da die eigene Logik als Builtin-Extension gekapselt ist, bleiben Konflikte klein — Overlay (`prepare_vscode.sh`) und `patches/` pro Merge prüfen.
+- [ ] **Upstream-Merge-Kadenz:** Alle 1–2 Monate auf das neueste VS-Code-Tag rebasen (Cursor: 1.79 → 1.83 → … im 1–2-Monats-Takt). Treiber: Extension-API-Kompatibilität und Upstream-CVEs (vgl. CVE-2024-43601 bei Cursor). Da die eigene Logik als Builtin-Extension gekapselt ist, bleiben Konflikte klein — Overlay (`prepare_vscode.sh`) und `patches/` pro Merge prüfen. **Ab Phase K gilt das nur eingeschränkt:** Chat-Patches und die product.json-Chat-Keys liegen im volatilsten Upstream-Bereich; pro Merge zuerst Chat-Proposed-APIs und die Chat-Verdrahtung diffen (Proposal-Allowlist in product.json, Kontextschlüssel `panelParticipantRegistered`, Patch 85).
 - [ ] **Insider/Nightly-Kanal nutzen:** Die geerbten `publish-insider-*`-Workflows als Kanal für experimentelle Features (Cursor testete Agents, Interpreter, Indexing monatelang nightly, bevor sie stable wurden).
 - [ ] **Feedback-Kanal in der App:** Button im Chat-Panel → GitHub-Issue vorausgefüllt (0.2.17) — ohne Telemetrie.
 - [ ] **Changelog pflegen:** Pro Release Stichpunkte (eigene Texte!). Diszipliniert wie Cursors Anfangszeit: klein, ehrlich, häufig.

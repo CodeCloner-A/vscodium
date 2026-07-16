@@ -4,6 +4,29 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.13.0] – 2026-07-15
+
+### Hinzugefügt
+- **Nativer Agent- und Edit-Modus (Roadmap Phase K, zweiter Schritt):** Die native Chat-UI bietet jetzt alle drei Modi an – pro Modus ein eigener Default-Participant (`vscodium-agent.default`/`.edit`/`.agent`), dem Muster der Core-Setup-Agents folgend, weil der Request den Modus nicht transportiert (Beleg in `docs/phase-k-verdrahtung.md`). Im Agent-Modus bedient der bestehende Agent-Loop die Anfrage mit allen Tools, im Edit-Modus mit der Edit-Teilmenge (lesen, suchen, editieren, Diagnosen – keine Kommandos, kein Löschen).
+- **Die Agent-Tools als native LanguageModelTools:** 9 der 10 Tools sind als `languageModelTools` beigesteuert und über `vscode.lm.registerTool` registriert (`ui/nativeTools.js`); `task_complete` bleibt Loop-intern. Der Core rendert die Tool-Cards und holt im Review-Modus die Freigabe über `confirmationMessages` ein (Auto-Modus fragt nicht); eine Ablehnung wird dem Modell wie bisher als „abgelehnt“ gemeldet, nicht als Fehler. Im Agent-Modus wirkt zusätzlich der native Tool-Picker: abgewählte Tools erreichen das Modell gar nicht erst.
+- **Datei-Änderungen laufen ins native Multi-File-Review:** Schreib-/Ersetz-Edits streamt der Lauf als `textEdit`-Parts, Löschungen als `workspaceEdit`-Part in das Chat-Editing des Cores (Annehmen/Verwerfen pro Datei im Editor) statt direkt auf die Platte (`NativeRunHost`; gelesen wird bevorzugt aus offenen Dokumenten, damit der Agent seine eigenen ungespeicherten Edits sieht). Braucht das Proposal `chatParticipantAdditions` (package.json + product.json-Allowlist ergänzt).
+
+### Geändert
+- Der Ask-Participant heißt im @-Mention-Namensraum jetzt `ask` (statt `agent`); `agent` trägt der neue Agent-Modus-Participant. IDs und gespeicherte Sitzungen sind nicht betroffen.
+- `AgentRun` akzeptiert je Lauf eine Tool-Teilmenge (`toolDeclarations`) und eine austauschbare Tool-Ausführung (`invokeTool`) – Grundlage für die native Tool-Route; Webview-Verhalten unverändert.
+
+### Behoben
+- **„Language model unavailable" im nativen Agent-Modus:** Der native Modell-Picker filtert im Agent-Modus (und Inline-Chat) auf die Fähigkeit `toolCalling` – unser `LanguageModelChatProvider` meldete sie fälschlich als `false`, wodurch die Modell-Liste leer blieb und Anfragen vor dem Participant scheiterten. Jetzt `toolCalling: true` (sachlich korrekt: der Proxy beherrscht Function Calling; gefunden beim ersten Praxistest gegen einen echten Core). Bewusste Grenze: `options.tools` fremder Konsumenten wird im Provider-Pfad noch nicht durchgeleitet – unser eigener Agent-Loop nutzt diesen Pfad nicht.
+
+### Bekannte Grenzen
+- Tool-Verkehr vergangener Runden wird im nativen Chat nicht in Folge-Requests rekonstruiert (nur Text-Historie); die Chat-Sync-Andockung folgt in einem späteren Phase-K-Schritt.
+- Das Kommando-Editieren vor der Ausführung (Webview-Feature) hat im nativen Freigabe-Dialog noch kein Gegenstück – Punkt der Review-Paritätsliste.
+
+## [0.12.0] – 2026-07-15
+
+### Hinzugefügt
+- **Nativer Core-Chat, erster Schritt (Roadmap Phase K):** Die Extension registriert einen Default-ChatParticipant für die native Chat-UI von VS Code 1.121 (Ask-Modus mit Projektbaum- und Aktivitätskontext, SSE-Streaming über den Agent-Proxy) sowie einen `LanguageModelChatProvider`, der das Proxy-Angebot (Gemini & Claude) in den nativen Modell-Picker speist (`ui/nativeChatController.js`, Kernlogik headless testbar in `lib/nativeChat.js`). Funktioniert nur auf dem gepatchten Fork: `isDefault` braucht das Proposal `defaultChatParticipant` (product.json-Allowlist) und die per Patch `85-chat-enable-native-agent.patch` aktivierte Chat-UI; auf fremden Basen scheitert die Registrierung kontrolliert und die Webview bleibt alleiniger Träger. Verdrahtungs-Beleg: `docs/phase-k-verdrahtung.md`. Agent-/Edit-Modus, Tools und Chat-Sync auf der nativen Oberfläche folgen in späteren Phase-K-Schritten.
+
 ## [0.11.0] – 2026-07-15
 
 ### Hinzugefügt

@@ -6,6 +6,7 @@
 
 const vscode = require('vscode');
 const { ChatViewProvider } = require('./ui/chatViewProvider');
+const { registerNativeChat } = require('./ui/nativeChatController');
 const { InlineEditController } = require('./ui/inlineEditController');
 const { AgentCodeActionProvider } = require('./ui/codeActions');
 const { DIFF_SCHEME, EXCLUDED_DIRS } = require('./lib/workspaceHost');
@@ -260,6 +261,12 @@ function activate(context) {
 			{ providedCodeActionKinds: AgentCodeActionProvider.providedCodeActionKinds }
 		)
 	);
+
+	// ── Nativer Core-Chat (Roadmap Phase K) ─────────────────────────────────
+	// Auf dem gepatchten Fork übernimmt die Core-Chat-UI (Default-Participant im
+	// Secondary Sidebar + Proxy-Modelle im nativen Picker). Auf fremden Basen
+	// scheitert die Registrierung kontrolliert; die Webview bleibt dann Träger.
+	registerNativeChat(context, provider, activity, logger);
 
 	// Agent-Chat beim IDE-Start automatisch öffnen (wie in agentischen IDEs üblich).
 	const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
