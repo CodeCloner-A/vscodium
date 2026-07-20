@@ -1,5 +1,7 @@
 # Probefahrt: Der neue native Chat (v0.13.0)
 
+> **Update 17.07.2026 (nach Probefahrt-Beginn):** VS Code 1.121 hat die separaten Ask-/Edit-Modi abgekündigt — das Auswahlfeld zeigt nur „Agent", und das ist korrekt so. Damit entfallen A1 (drei Modi), die Ask-Teile von A3/C sowie Abschnitt G komplett; alles andere gilt. Entscheid: Statt Ask/Edit kommen „Plan" und „Erweiterter Plan" als eigene Einträge (nächstes Inkrement, siehe ROADMAP Phase K).
+
 Diese Anleitung ist für dich als Nicht-Programmierer geschrieben. Sie führt dich einmal komplett durch: **Spielstand sichern → Werkzeuge installieren → Programm bauen → neue Chat-Oberfläche durchtesten.** Du musst nichts verstehen, was hier nicht erklärt wird — einfach der Reihe nach abarbeiten. Wenn irgendwo etwas anderes passiert als beschrieben: nicht schlimm, notiere kurz was (am besten Screenshot) und gib es an Claude weiter.
 
 **Zeitbedarf:** Vorbereitung ca. 30 Minuten, der Bau selbst 1–3 Stunden (läuft von allein), die Probefahrt ca. 30–45 Minuten.
@@ -142,6 +144,21 @@ Schreib Claude einfach formlos, z. B.:
 > „A–C ok. D4: Ausgabe zeigte nur die erste Zeile. F2: er hat trotzdem ein Kommando ausgeführt. Screenshots anbei."
 
 Daraus wird dann die Fixliste für die nächste Session. Wenn alles grün ist: Glückwunsch — dann ist der native Chat offiziell fahrtauglich, und als Nächstes docken wir die Chat-Verläufe (Sync) an die neue Oberfläche an.
+
+## Ergebnis der ersten Probefahrt (17.–20.07.2026)
+
+**Bestanden:** Build inkl. Verdrahtung (product.json, Patch 85, Extension v0.13.0 als Builtin, Copilot entfernt); Registrierung sauber (9/9 Tools, alle drei Participants, Modell-Provider; Extension Host ohne „CANNOT"-Fehler); Agent-Modus end-to-end — Projektverständnis, Kommentar-Edits, Ordner anlegen, Datei löschen inkl. Wiederherstellen über das Review, Tool-Cards; Modell-Picker mit Proxy-Angebot (nach `toolCalling`-Fix); Auto-Modus ohne Nachfragen; Anmeldung + Proxy-Verkehr; **D4/Punkt 11: Kommandos sehen per Datei-Werkzeug gestreamte Edits sofort auf der Platte** (`type` lieferte den frischen Inhalt, Beleg: `"stdout":"TEST 123\r\n"`) — kein zusätzliches Speichern vor `run_command` nötig.
+
+**Fixliste für das nächste Inkrement:**
+
+1. **Plan-Modi statt Ask/Edit** (Entscheid, siehe ROADMAP Phase K): „Plan" + „Erweiterter Plan" als native Picker-Einträge; ask/edit-Participants zurückbauen. Ask/Edit sind implementiert und registriert (Log belegt es), haben aber upstream-bedingt keinen UI-Zugang mehr.
+2. **Anmelde-Hinweis statt „Language model unavailable":** Ohne Anmeldung braucht der Modell-Provider einen Platzhalter-Eintrag, damit Anfragen bei unserem Participant landen und freundlich zur Anmeldung führen.
+3. **Netz-Resilienz (Start UND Lauf):** Beim App-Start schlugen Katalog-Abruf und Sitzungs-Sync einmalig fehl („Agent-Proxy nicht erreichbar: fetch failed") — die Fallbacks griffen, aber es fehlt ein automatischer zweiter Versuch, sobald das Netz steht (Folge-Symptom: „Could not find model … in local cache", Core löst selbst nach). Zusätzlich brach bei der D4-Probe Lauf 1 mit Status `error` ab — mutmaßlich ein einzelner fehlgeschlagener Modell-Aufruf bei der Abschlussantwort (die Chat-Antwort riss mitten im Satz ab); der Loop sollte einzelne Aufruf-Fehler einmal wiederholen, statt den Lauf zu beenden. Lauf 2 (identischer Auftrag) lief fehlerfrei durch.
+
+4. **Chat-Scrolling/Verdeckung am Antwort-Ende:** Unter der letzten Antwort lässt sich nicht weit genug scrollen — die Aktions-Icons (Erneut, Kopieren, Daumen) sind nicht erreichbar; mutmaßlich verdeckt dasselbe Layout-Problem auch die Fortfahren/Abbrechen-Knöpfe der Freigabe-Karten (Workaround: Panel vergrößern bzw. „Input"-Bereich der Karte zuklappen). Prüfen, ob Upstream-Bug oder Folge unseres Setups.
+5. **Deutsche Zwischentexte:** Die Zwischen-Schritte des Agenten kamen englisch („I will first search …"), obwohl der System-Prompt Deutsch verlangt — Prompt nachschärfen (gilt v. a. für Gemini).
+
+**Optional offen:** F (Tool-Picker-Abwahl greift), I2 (zwei Fenster parallel).
 
 ## Falls gar nichts geht
 
