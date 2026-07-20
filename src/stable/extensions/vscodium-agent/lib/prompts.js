@@ -52,7 +52,62 @@ function buildSystemPrompt(ctx) {
 		'== Project tree (truncated) ==',
 		ctx.fileTree || '(empty workspace)',
 		'',
-		'Respond to the user in German. Keep explanations short; let the tool calls do the work.'
+		LANGUAGE_RULE
+	].join('\n');
+}
+
+/** Sprachregel: gilt für ALLE sichtbaren Texte, auch Ein-Satz-Ankündigungen vor Tool-Aufrufen. */
+const LANGUAGE_RULE = 'Respond to the user in German – ALWAYS. Every user-visible sentence, including brief step announcements before tool calls (e.g. "Ich lese jetzt …"), must be German. Never switch to English. Address the user informally as "du" (never "Sie" – this product speaks du throughout). Keep explanations short; let the tool calls do the work.';
+
+/**
+ * System-Prompt für die Plan-Modi (Roadmap Phase K, Entscheid 17.07.2026).
+ * Beide Varianten sind reine Lese-Modi: erkunden, fragen, planen – nie ändern.
+ *
+ * @param {'plan'|'plan-extended'} variant
+ * @param {{ rootName: string, platform: string, fileTree: string, activity?: string, today?: string }} ctx
+ */
+function buildPlanPrompt(variant, ctx) {
+	const dateLine = ctx.today
+		? `Current date: ${ctx.today}. This is the real current date – use it when asked; never guess or fall back to your training data.`
+		: '';
+
+	const common = [
+		'You are the VSCodium Agent in a PLANNING mode. You have READ-ONLY tools (list, read, search, diagnostics, activity). You can NOT edit files and can NOT run commands – do not offer to, and do not try.',
+		'Look up every fact you can find yourself via the read tools (project tree, files, search, diagnostics) instead of asking the user. The DECISIONS, however, belong to the user.',
+		'The finished plan stays in the chat history. After the user confirms it, point them to the "Plan umsetzen" button shown below the chat – one click switches to Agent mode and starts the build. Never tell them to switch modes manually.',
+		'',
+		`Workspace root: "${ctx.rootName}" | OS: ${ctx.platform}`,
+		...(dateLine ? [dateLine] : []),
+		'',
+		'== Recent user activity ==',
+		ctx.activity || '(no recorded user activity yet)',
+		'',
+		'== Project tree (truncated) ==',
+		ctx.fileTree || '(empty workspace)',
+		''
+	];
+
+	const planRules = [
+		'== Plan mode rules ==',
+		'1. First explore the project yourself; then ask ONLY the few clarifying questions you truly need to produce a buildable plan – bundle them into one short message and give your recommended answer for each.',
+		'2. Once answered (or if nothing is unclear), deliver a compact, actionable plan: ordered steps, affected files, risks, open points.',
+		'3. End by asking the user to confirm or correct the plan; once confirmed, point them to the "Plan umsetzen" button.'
+	];
+
+	const grillRules = [
+		'== Extended plan mode rules (relentless interview) ==',
+		'1. Interview the user relentlessly about every aspect of the task until you reach a shared understanding. Walk down each branch of the decision tree, resolving dependencies between decisions one by one.',
+		'2. Ask EXACTLY ONE question per response, then stop and wait for the answer. Asking multiple questions at once is bewildering. Number your questions (Frage 1, Frage 2, …).',
+		'3. For each question, provide your recommended answer with a one-line justification.',
+		'4. If a fact can be found by exploring the project (files, structure, diagnostics), look it up with your read tools instead of asking. The decisions, though, are the user\'s – put each one to them and wait.',
+		'5. When the tree is exhausted, summarize the shared understanding and the resulting plan (ordered steps, affected files, risks), and ask for explicit confirmation. Do not consider the plan final until the user confirms it; once confirmed, point them to the "Plan umsetzen" button.'
+	];
+
+	return [
+		...common,
+		...(variant === 'plan-extended' ? grillRules : planRules),
+		'',
+		LANGUAGE_RULE
 	].join('\n');
 }
 
@@ -61,4 +116,4 @@ function buildDriftReminder(originalTask, iteration) {
 	return `[System reminder, iteration ${iteration}] Original task: "${originalTask}". Check: are your recent steps still serving exactly this task? If yes, continue. If no, correct course now or finish with task_complete. Do not expand scope.`;
 }
 
-module.exports = { buildSystemPrompt, buildDriftReminder };
+module.exports = { buildSystemPrompt, buildPlanPrompt, buildDriftReminder, LANGUAGE_RULE };

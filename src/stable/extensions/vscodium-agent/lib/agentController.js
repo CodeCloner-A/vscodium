@@ -46,6 +46,8 @@ class AgentRun {
 		this.invokeTool = typeof opts.invokeTool === 'function'
 			? opts.invokeTool
 			: (name, args) => executeTool(this.host, name, args);
+		/** Pause vor dem einmaligen Wiederholversuch bei Netzfehlern (Tests: 0). */
+		this.retryDelayMs = typeof opts.retryDelayMs === 'number' ? opts.retryDelayMs : 1200;
 		/** Gemini-"contents"-Historie (über Aufgaben hinweg wiederverwendbar). */
 		this.contents = Array.isArray(opts.history) ? opts.history : [];
 		this.filesChanged = new Set();
@@ -66,21 +68,41 @@ class AgentRun {
 			}
 
 			let response;
-			try {
-				response = await this.client.generateContent({
-					systemInstruction: { role: 'system', parts: [{ text: this.systemPrompt }] },
-					contents: this.contents,
-					tools: [{ functionDeclarations: this.toolDeclarations }],
-					toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
-					generationConfig: { temperature: 0.2 }
-				}, this.signal);
-			} catch (err) {
-				if (err && err.name === 'AbortError') {
-					return { status: 'stopped' };
+			// Ein einzelner Netz-Schluckauf (z. B. "fetch failed" mitten im Lauf) soll den
+			// Lauf nicht beenden: Fehler OHNE HTTP-Status gelten als transient und werden
+			// genau EINMAL wiederholt. Server-Antworten (Status gesetzt, z. B. Quota-429)
+			// werden bewusst nicht wiederholt – das regeln Client und Proxy.
+			for (let attempt = 1; ; attempt++) {
+				try {
+					const request = {
+						systemInstruction: { role: 'system', parts: [{ text: this.systemPrompt }] },
+						contents: this.contents,
+						generationConfig: { temperature: 0.2 }
+					};
+					// Ohne Deklarationen (z. B. Chat ohne Workspace-Ordner) KEIN tools-Feld:
+					// leere functionDeclarations quittieren manche Backends mit 400.
+					if (this.toolDeclarations.length > 0) {
+						request.tools = [{ functionDeclarations: this.toolDeclarations }];
+						request.toolConfig = { functionCallingConfig: { mode: 'AUTO' } };
+					}
+					response = await this.client.generateContent(request, this.signal);
+					break;
+				} catch (err) {
+					if (err && err.name === 'AbortError') {
+						return { status: 'stopped' };
+					}
+					const transient = !(err && err.status) && attempt === 1;
+					if (!transient) {
+						const hint = err && err.hint ? `\n${err.hint}` : '';
+						this.ui.error(`${err.message}${hint}`);
+						return { status: 'error', summary: err.message };
+					}
+					this.ui.info('Verbindungsproblem – ich versuche es gleich noch einmal …');
+					await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
+					if (this.signal && this.signal.aborted) {
+						return { status: 'stopped' };
+					}
 				}
-				const hint = err && err.hint ? `\n${err.hint}` : '';
-				this.ui.error(`${err.message}${hint}`);
-				return { status: 'error', summary: err.message };
 			}
 
 			const blockReason = extractBlockReason(response);

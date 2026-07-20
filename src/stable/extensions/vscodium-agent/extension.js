@@ -201,7 +201,42 @@ function activate(context) {
 			void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:vscodium.vscodium-agent');
 		}),
 
-		vscode.commands.registerCommand('vscodiumAgent.showLog', () => output.show(true))
+		vscode.commands.registerCommand('vscodiumAgent.showLog', () => output.show(true)),
+
+		// Einsteiger-Weg aus dem ordnerlosen Chat (Phase K): legt auf Klick einen
+		// neuen Projektordner unter Dokumente\VSCodium-Projekte an und öffnet ihn.
+		// Läuft NUR auf Nutzer-Geste – der Agent selbst schreibt nie außerhalb
+		// eines geöffneten Workspace.
+		vscode.commands.registerCommand('vscodiumAgent.createWorkspace', async () => {
+			const name = await vscode.window.showInputBox({
+				prompt: 'Wie soll dein Projektordner heißen?',
+				value: 'mein-projekt',
+				validateInput: (v) => /^[\w][\w .-]*$/.test(String(v || '').trim())
+					? undefined
+					: 'Bitte nur Buchstaben, Zahlen, Leerzeichen, Punkt, - und _ verwenden.'
+			});
+			if (!name) { return; }
+			try {
+				const os = require('os');
+				const path = require('path');
+				const base = path.join(os.homedir(), 'Documents', 'VSCodium-Projekte');
+				let target = path.join(base, name.trim());
+				// Namenskollision: mein-projekt, mein-projekt-2, mein-projekt-3, …
+				for (let i = 2; ; i++) {
+					try {
+						await vscode.workspace.fs.stat(vscode.Uri.file(target));
+						target = path.join(base, `${name.trim()}-${i}`);
+					} catch (_e) { break; }
+				}
+				const uri = vscode.Uri.file(target);
+				await vscode.workspace.fs.createDirectory(uri);
+				logger.info(`Neuer Projektordner angelegt: ${target}`);
+				await vscode.commands.executeCommand('vscode.openFolder', uri, { forceNewWindow: false });
+			} catch (err) {
+				logger.error('Projektordner anlegen fehlgeschlagen', err);
+				void vscode.window.showErrorMessage(`Projektordner konnte nicht angelegt werden: ${err.message}`);
+			}
+		})
 	);
 
 	// ── Inline-Edit (Strg+I), Quick-Fixes, Terminal-Debug ───────────────────

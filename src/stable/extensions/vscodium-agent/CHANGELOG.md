@@ -4,6 +4,22 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.14.0] – 2026-07-20
+
+### Hinzugefügt
+- **Plan-Modi (Roadmap Phase K, Entscheid 17.07.2026):** Das Auswahlfeld des nativen Chats bietet neben „Agent" jetzt **„Plan"** und **„Erweiterter Plan"** – ausgeliefert als Custom Agents über den stabilen `contributes.chatAgents`-Extension-Point (`agents/*.agent.md`). „Plan" erkundet das Projekt selbst, stellt nur die nötigsten Klärungsfragen (gebündelt, je mit Empfehlung) und liefert einen bestätigungsfähigen Plan. „Erweiterter Plan" interviewt unerbittlich nach GrillMe-Vorbild: exakt EINE Frage pro Runde mit empfohlener Antwort, Entscheidungsbaum Zweig für Zweig, Fakten werden über Lese-Tools selbst nachgeschlagen, gebaut wird erst nach ausdrücklich bestätigtem gemeinsamem Verständnis. Beide Modi sind hart auf Lese-Tools beschränkt – erzwungen serverseitig über einen Marker in den Mode-Instructions (`lib/nativeChat.js`), unabhängig von der Tool-Mechanik der UI. Eigene `.agent.md` des Nutzers ohne Marker laufen generisch: Agent-Modus + angehängte Zusatz-Instructions. **Plan → Agent per Klick:** Beide Plan-Modi deklarieren einen nativen Handoff („Plan umsetzen", `send: true`) – nach der Plan-Bestätigung genügt ein Klick auf den Knopf unter dem Chat: Er wechselt in den Agent-Modus und startet die Umsetzung automatisch (Probefahrt-Wunsch 20.07.).
+- **Anmelde-Hinweis statt „Language model unavailable":** Ohne Anmeldung liefert der Modell-Provider einen Platzhalter-Eintrag („Anmelden erforderlich"), sodass Anfragen unseren Participant erreichen und mit verständlichem Hinweis plus **„Mit Google anmelden"-Knopf** beantwortet werden (Probefahrt-Befund 2).
+- **Netz-Resilienz im Agent-Loop:** Ein einzelner Modell-Aufruf-Fehler ohne HTTP-Status (z. B. `fetch failed` mitten im Lauf) wird nach kurzer Pause genau einmal wiederholt statt den Lauf zu beenden; Server-Antworten wie Quota-429 werden weiterhin nicht wiederholt (Probefahrt-Befund: Lauf-Abbruch bei der Abschlussantwort).
+- **Tools im Tool-Picker steuerbar:** Alle 9 Werkzeuge tragen jetzt `canBeReferencedInPrompt` + `toolReferenceName` – sie erscheinen in der Werkzeug-Auswahl der UI (und sind per `#name` referenzierbar); ohne das Flag nahm die Enablement-Mechanik der UI sie gar nicht erst auf.
+
+### Behoben
+- **Chat ohne Projektordner funktioniert jetzt** (Probefahrt-Befund 20.07.): Statt des harten Fehlers „Kein Workspace-Ordner geöffnet" läuft die Unterhaltung normal weiter – Fragen, Erklärungen, Code-Beispiele –, nur eben ohne Datei-/Kommando-Werkzeuge (der Modell-Request lässt das tools-Feld dann komplett weg). Erst wenn der Nutzer an Dateien arbeiten will, erklärt der Agent einsteigerfreundlich den Weg – ohne Fachbegriffe wie „Workspace" vorauszusetzen – und unter der Antwort erscheinen zwei Knöpfe: **„Neuen Projektordner anlegen"** (fragt nur nach einem Namen, legt den Ordner unter `Dokumente\VSCodium-Projekte\` an und öffnet ihn – neues Kommando `vscodiumAgent.createWorkspace`, läuft ausschließlich auf Klick) und **„Vorhandenen Ordner öffnen…"**.
+
+### Geändert
+- **Sessions-Liste legt sich über den Chat statt nach außen:** Produkt-Default `chat.viewSessions.orientation: "stacked"` (per `configurationDefaults`, kein Core-Patch) — die „Agent Sessions"-Übersicht erscheint gestapelt im Chat-Bereich; wer es anders mag, stellt das Setting um.
+- **Ask- und Edit-Participants entfernt:** Upstream hat die Builtin-Modi Ask/Edit abgekündigt (Picker zeigt sie nicht mehr an); der Agent-Participant (`vscodium-agent.agent`) trägt allein die Chat-View. Ask-Verhalten deckt der Agent-Modus ab, den Edit-Platz nehmen die Plan-Modi ein (Nutzer-Entscheid: kein Edit-Comeback).
+- **Sprachregel verschärft:** Alle sichtbaren Texte – auch Ein-Satz-Ankündigungen vor Tool-Aufrufen – müssen deutsch sein (Probefahrt-Befund: englische Zwischentexte bei Gemini).
+
 ## [0.13.0] – 2026-07-15
 
 ### Hinzugefügt

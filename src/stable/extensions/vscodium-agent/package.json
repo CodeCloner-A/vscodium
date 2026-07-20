@@ -2,7 +2,7 @@
   "name": "vscodium-agent",
   "displayName": "VSCodium Agent",
   "description": "Integrierter KI-Agent (Gemini & Claude über den Agent-Proxy): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
@@ -37,26 +37,6 @@
   "contributes": {
     "chatParticipants": [
       {
-        "id": "vscodium-agent.default",
-        "name": "ask",
-        "fullName": "VSCodium Agent",
-        "description": "Fragen zu Projekt und Code – Antworten über den Agent-Proxy (Gemini & Claude).",
-        "isDefault": true,
-        "modes": [
-          "ask"
-        ]
-      },
-      {
-        "id": "vscodium-agent.edit",
-        "name": "edit",
-        "fullName": "VSCodium Agent",
-        "description": "Gezielte Datei-Änderungen mit Review im Editor – ohne Kommando-Ausführung.",
-        "isDefault": true,
-        "modes": [
-          "edit"
-        ]
-      },
-      {
         "id": "vscodium-agent.agent",
         "name": "agent",
         "fullName": "VSCodium Agent",
@@ -67,14 +47,24 @@
         ]
       }
     ],
+    "chatAgents": [
+      {
+        "path": "./agents/plan.agent.md"
+      },
+      {
+        "path": "./agents/erweiterter-plan.agent.md"
+      }
+    ],
     "languageModelTools": [
       {
         "name": "list_files",
+        "toolReferenceName": "list_files",
         "displayName": "Projektbaum lesen",
         "userDescription": "Listet Dateien und Ordner des Workspace als Baum.",
         "modelDescription": "Lists files and folders of the workspace as a tree (common build/dependency folders are excluded).",
         "icon": "$(list-tree)",
         "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -84,11 +74,13 @@
       },
       {
         "name": "read_file",
+        "toolReferenceName": "read_file",
         "displayName": "Datei lesen",
         "userDescription": "Liest eine Textdatei aus dem Workspace (mit Zeilennummern).",
         "modelDescription": "Reads a text file from the workspace. Returns content with line numbers. Use start_line/end_line for large files.",
         "icon": "$(file)",
         "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -101,11 +93,13 @@
       },
       {
         "name": "search_project",
+        "toolReferenceName": "search_project",
         "displayName": "Projekt durchsuchen",
         "userDescription": "Durchsucht alle Textdateien des Workspace nach Text oder Regex.",
         "modelDescription": "Searches all workspace text files for a string or regular expression. Returns matches as path:line: text.",
         "icon": "$(search)",
         "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -118,11 +112,13 @@
       },
       {
         "name": "write_file",
+        "toolReferenceName": "write_file",
         "displayName": "Datei schreiben",
         "userDescription": "Legt eine Datei an oder überschreibt sie vollständig (mit Review).",
         "modelDescription": "Creates a new file or fully overwrites an existing one. Subject to user approval in review mode.",
         "icon": "$(new-file)",
         "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -135,11 +131,13 @@
       },
       {
         "name": "replace_in_file",
+        "toolReferenceName": "replace_in_file",
         "displayName": "Textstelle ersetzen",
         "userDescription": "Ersetzt eine eindeutige Textpassage in einer Datei (mit Review).",
         "modelDescription": "Targeted edit: replaces an exact, unique text passage in a file. old_text must match exactly once (include enough surrounding lines to make it unique).",
         "icon": "$(edit)",
         "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -153,11 +151,13 @@
       },
       {
         "name": "delete_file",
+        "toolReferenceName": "delete_file",
         "displayName": "Datei löschen",
         "userDescription": "Löscht eine Datei aus dem Workspace (mit Review).",
         "modelDescription": "Deletes a file from the workspace. Subject to user approval in review mode.",
         "icon": "$(trash)",
         "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -169,11 +169,13 @@
       },
       {
         "name": "run_command",
+        "toolReferenceName": "run_command",
         "displayName": "Kommando ausführen",
         "userDescription": "Führt ein Shell-Kommando im Workspace aus (mit Freigabe).",
         "modelDescription": "Runs a shell command in the workspace root (e.g. tests, build, linter). Non-interactive; output is captured. Subject to user approval in review mode.",
         "icon": "$(terminal)",
         "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -187,11 +189,13 @@
       },
       {
         "name": "get_recent_activity",
+        "toolReferenceName": "get_recent_activity",
         "displayName": "Editor-Aktivität",
         "userDescription": "Zeigt, woran zuletzt im Editor gearbeitet wurde.",
         "modelDescription": "Returns which files the user recently worked on in the IDE (active file, recently edited/saved files) and what was touched since your last context capture. Use it when the task is ambiguous about where to work, or during long tasks to stay up to date.",
         "icon": "$(history)",
         "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {}
@@ -199,11 +203,13 @@
       },
       {
         "name": "get_diagnostics",
+        "toolReferenceName": "get_diagnostics",
         "displayName": "Diagnosen lesen",
         "userDescription": "Liest aktuelle Fehler und Warnungen der Sprachdienste.",
         "modelDescription": "Returns current errors/warnings from the IDE language services (compiler, linter), optionally filtered by file.",
         "icon": "$(warning)",
         "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -218,6 +224,9 @@
         "displayName": "VSCodium Agent"
       }
     ],
+    "configurationDefaults": {
+      "chat.viewSessions.orientation": "stacked"
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -278,6 +287,11 @@
       {
         "command": "vscodiumAgent.showLog",
         "title": "Log anzeigen",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.createWorkspace",
+        "title": "Neuen Projektordner anlegen",
         "category": "Agent"
       },
       {

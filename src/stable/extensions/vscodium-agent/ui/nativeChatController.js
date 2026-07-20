@@ -1,48 +1,54 @@
 /*---------------------------------------------------------------------------------------------
  * VSCodium Agent – Glue für den nativen Core-Chat (Roadmap Phase K).
  *
- * Registriert (1) DREI Default-ChatParticipants – einen pro Modus (ask/edit/agent),
- * dem Muster der Core-Setup-Agents folgend, denn der Modus steht NICHT im Request
- * (Beleg in docs/phase-k-verdrahtung.md) –, (2) die Agent-Tools als native
- * LanguageModelTools (ui/nativeTools.js) und (3) einen LanguageModelChatProvider,
- * der das Proxy-Angebot in den nativen Modell-Picker speist.
+ * Registriert (1) EINEN Default-ChatParticipant für den Agent-Modus (Upstream hat
+ * die Builtin-Modi Ask/Edit abgekündigt – Beleg in docs/phase-k-verdrahtung.md,
+ * Befund 8), (2) die Agent-Tools als native LanguageModelTools (ui/nativeTools.js)
+ * und (3) einen LanguageModelChatProvider, der das Proxy-Angebot in den nativen
+ * Modell-Picker speist – ohne Anmeldung mit einem Platzhalter-Eintrag, damit
+ * Anfragen bei uns landen und freundlich zur Anmeldung führen statt mit
+ * „Language model unavailable“ zu scheitern.
  *
- * Modus-Verhalten:
- *   ask    – Fragen beantworten, keine Tools (Streaming über den Agent-Proxy).
- *   edit   – Agent-Loop mit Lese-/Edit-Tools; Datei-Edits laufen als textEdit-Parts
- *            ins native Chat-Editing (Multi-File-Review).
- *   agent  – voller Agent-Loop mit allen Tools; Freigaben rendert der Core aus den
- *            confirmationMessages der Tools (Review-Modus), Auto-Modus fragt nicht.
+ * Die Plan-Modi (Entscheid 17.07.2026) kommen als Custom Agents aus
+ * `agents/*.agent.md` (contributes.chatAgents, stabiler Extension-Point). Der
+ * Handler erkennt sie am Marker in `request.modeInstructions` und erzwingt die
+ * Lese-Tool-Teilmenge serverseitig – unabhängig von der Tool-Mechanik der UI.
+ * Custom Agents OHNE Marker (z. B. eigene .agent.md des Nutzers) laufen als
+ * Agent-Modus mit angehängten Zusatz-Instructions.
  *
  * Läuft nur auf dem gepatchten Fork rund: `isDefault`/`modes` brauchen das Proposal
- * `defaultChatParticipant`, textEdit-/workspaceEdit-Streams `chatParticipantAdditions`
- * (beide in der product.json des Builds freigeschaltet). Auf fremden Basen scheitern
- * die Registrierungen kontrolliert – die Webview bleibt alleiniger Träger.
+ * `defaultChatParticipant`, textEdit-/workspaceEdit-Streams und `modeInstructions`
+ * das Proposal `chatParticipantAdditions` (beide in der product.json des Builds
+ * freigeschaltet). Auf fremden Basen scheitern die Registrierungen kontrolliert –
+ * die Webview bleibt alleiniger Träger.
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
 
 const vscode = require('vscode');
 const {
-	buildAskRequest,
 	simplifyHistory,
 	historyToContents,
 	lmMessagesToContents,
 	streamAskResponse,
+	parseModeMarker,
 	declarationsForMode,
 	toolsMapToNames,
 	parseToolResultText,
 	lmResultToText,
-	buildNativeModeNotes
+	buildNativeModeNotes,
+	NO_WORKSPACE_NOTES
 } = require('../lib/nativeChat');
 const { AgentRun } = require('../lib/agentController');
-const { buildSystemPrompt } = require('../lib/prompts');
+const { buildSystemPrompt, buildPlanPrompt } = require('../lib/prompts');
 const { registerNativeTools, runContexts, NativeRunHost } = require('./nativeTools');
 
-const PARTICIPANT_ID = 'vscodium-agent.default';
-const EDIT_PARTICIPANT_ID = 'vscodium-agent.edit';
 const AGENT_PARTICIPANT_ID = 'vscodium-agent.agent';
 const MODEL_VENDOR = 'vscodium-agent';
+/** Platzhalter-Modell, das ohne Anmeldung im Picker steht. */
+const SIGN_IN_MODEL_ID = 'anmeldung-erforderlich';
+/** Marker → Plan-Variante (bewusst explizit statt „alles durchreichen“). */
+const PLAN_VARIANTS = new Set(['plan', 'plan-extended']);
 
 /**
  * @param {import('vscode').ExtensionContext} context
@@ -58,44 +64,34 @@ function registerNativeChat(context, provider, activity, logger) {
 		logger
 	});
 
-	const specs = [
-		{ id: PARTICIPANT_ID, mode: 'ask' },
-		{ id: EDIT_PARTICIPANT_ID, mode: 'edit' },
-		{ id: AGENT_PARTICIPANT_ID, mode: 'agent' }
-	];
-	let participants = 0;
-	for (const spec of specs) {
-		if (registerParticipant(context, deps, spec)) { participants++; }
-	}
+	const participants = registerParticipant(context, deps) ? 1 : 0;
 	const modelProvider = participants > 0 ? registerModelProvider(context, provider, logger) : false;
 	return { participants, tools: deps.toolCount, modelProvider };
 }
 
-// ── Default-ChatParticipants (ein Participant pro Modus) ────────────────────
+// ── Default-ChatParticipant (Agent-Modus; Plan-Modi kommen als Custom Agents) ──
 
-function registerParticipant(context, deps, spec) {
+function registerParticipant(context, deps) {
 	if (!vscode.chat || typeof vscode.chat.createChatParticipant !== 'function') {
 		deps.logger.info('Nativer Chat: chat-API nicht verfügbar – Webview bleibt alleiniger Träger.');
 		return false;
 	}
 	let participant;
 	try {
-		participant = vscode.chat.createChatParticipant(spec.id, (request, chatContext, stream, token) =>
-			spec.mode === 'ask'
-				? handleAskRequest(deps, request, chatContext, stream, token)
-				: handleAgentRequest(deps, spec.mode, request, chatContext, stream, token)
+		participant = vscode.chat.createChatParticipant(AGENT_PARTICIPANT_ID, (request, chatContext, stream, token) =>
+			handleAgentRequest(deps, request, chatContext, stream, token)
 		);
 	} catch (err) {
 		// Erwartbar auf Basen ohne Proposal-Freischaltung (die chatParticipants-
 		// Contribution wurde dann verworfen) – kein Nutzerfehler, nur protokollieren.
-		deps.logger.warn(`Nativer Chat: Registrierung von ${spec.id} nicht möglich – Webview bleibt alleiniger Träger.`, err);
+		deps.logger.warn(`Nativer Chat: Registrierung von ${AGENT_PARTICIPANT_ID} nicht möglich – Webview bleibt alleiniger Träger.`, err);
 		return false;
 	}
 	try {
 		participant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'agent.svg');
 	} catch (_e) { /* Icon ist optional */ }
 	context.subscriptions.push(participant);
-	deps.logger.info(`Nativer Chat: Default-Participant registriert (${spec.id}, Modus ${spec.mode}).`);
+	deps.logger.info(`Nativer Chat: Default-Participant registriert (${AGENT_PARTICIPANT_ID}, Modus agent; Plan-Modi via agents/*.agent.md).`);
 	return true;
 }
 
@@ -104,67 +100,40 @@ function pickedModelId(request) {
 	return request.model && request.model.vendor === MODEL_VENDOR ? request.model.id : undefined;
 }
 
+/** Anmelde-Hinweis mit Button streamen (statt kryptischer Systemmeldungen). */
+function streamSignInHint(stream) {
+	stream.markdown('**Nicht angemeldet.** Der Agent spricht über den Agent-Proxy mit Gemini & Claude – dafür braucht es dein Google-Konto.\n\n');
+	try {
+		stream.button({ command: 'vscodiumAgent.signIn', title: 'Mit Google anmelden' });
+	} catch (_e) { /* Button ist Komfort – der Text erklärt den Weg. */ }
+	stream.markdown('\nDanach die Frage einfach erneut senden.\n');
+}
+
 async function buildClientOrExplain(provider, request, stream) {
 	try {
 		return await provider.buildClient(pickedModelId(request));
 	} catch (err) {
-		stream.markdown(`**Nicht verbunden:** ${err.message}${err.hint ? `\n\n_${err.hint}_` : ''}`);
+		if (/angemeldet/i.test(String(err.message || ''))) {
+			streamSignInHint(stream);
+		} else {
+			stream.markdown(`**Nicht verbunden:** ${err.message}${err.hint ? `\n\n_${err.hint}_` : ''}`);
+		}
 		return null;
 	}
 }
 
-// ── Ask-Modus: erklären, nicht ändern ────────────────────────────────────────
+// ── Agent-/Plan-Requests: der Agent-Loop hinter der nativen Oberfläche ───────
 
-async function handleAskRequest(deps, request, chatContext, stream, token) {
-	const { provider, activity, logger } = deps;
-	const abort = new AbortController();
-	const cancellation = token.onCancellationRequested(() => abort.abort());
-	try {
-		const client = await buildClientOrExplain(provider, request, stream);
-		if (!client) { return {}; }
-
-		const host = provider.getHost();
-		const fileTree = await Promise.resolve(host.listProjectFiles()).catch(() => '');
-		let activitySummary = '';
-		try {
-			activitySummary = typeof host.activityCallback === 'function'
-				? String(host.activityCallback() || '')
-				: (activity ? String(activity.summary(8, 0) || '') : '');
-		} catch (_e) { /* Aktivität ist optionaler Kontext */ }
-
-		const workspaceFolder = (vscode.workspace.workspaceFolders || [])[0];
-		const geminiRequest = buildAskRequest(
-			{
-				rootName: host.rootName || (workspaceFolder ? workspaceFolder.name : ''),
-				platform: process.platform,
-				today: new Date().toISOString().slice(0, 10),
-				fileTree,
-				activity: activitySummary
-			},
-			simplifyHistory(chatContext && chatContext.history),
-			request.prompt
-		);
-
-		await streamAskResponse(client, geminiRequest, abort.signal, (t) => stream.markdown(t));
-		return {};
-	} catch (err) {
-		if (abort.signal.aborted) { return {}; }
-		logger.error('Nativer Chat: Anfrage fehlgeschlagen', err);
-		stream.markdown(`**Fehler:** ${err.message}${err.hint ? `\n\n_${err.hint}_` : ''}`);
-		return { errorDetails: { message: String(err.message || err) } };
-	} finally {
-		cancellation.dispose();
-	}
-}
-
-// ── Agent-/Edit-Modus: der Agent-Loop hinter der nativen Oberfläche ─────────
-
-async function handleAgentRequest(deps, mode, request, chatContext, stream, token) {
+async function handleAgentRequest(deps, request, chatContext, stream, token) {
 	const { provider, activity, logger } = deps;
 	const abort = new AbortController();
 	const cancellation = token.onCancellationRequested(() => abort.abort());
 	let exitRun = null;
 	try {
+		if (pickedModelId(request) === SIGN_IN_MODEL_ID) {
+			streamSignInHint(stream);
+			return {};
+		}
 		if (deps.toolCount === 0) {
 			stream.markdown('**Native Tools nicht verfügbar** – dieser Build kann den Agent-Modus im nativen Chat nicht ausführen. Bitte die Agent-Ansicht (Seitenleiste) verwenden.');
 			return { errorDetails: { message: 'Native Tools nicht registriert.' } };
@@ -172,47 +141,71 @@ async function handleAgentRequest(deps, mode, request, chatContext, stream, toke
 		const client = await buildClientOrExplain(provider, request, stream);
 		if (!client) { return {}; }
 
-		const cfg = provider.config();
-		const host = new NativeRunHost(stream, {
-			approvalMode: cfg.approvalMode,
-			terminalMode: cfg.terminalMode,
-			commandTimeoutSec: cfg.commandTimeoutSec,
-			maxTreeEntries: cfg.maxTreeEntries,
-			logger
-		});
-		if (activity) {
-			host.activityCallback = () => activity.summary(8, 0);
-		}
-		exitRun = runContexts.enter(request.toolInvocationToken, { host, signal: abort.signal });
+		// Ohne geöffneten Ordner bleibt der Chat voll gesprächsfähig – nur ohne
+		// Datei-/Kommando-Werkzeuge. Einsteiger führt das Modell bei Bedarf selbst
+		// zum Ordner-Öffnen (NO_WORKSPACE_NOTES), statt abgewiesen zu werden.
+		const hasWorkspace = (vscode.workspace.workspaceFolders || []).length > 0;
 
-		const fileTree = await Promise.resolve(host.listProjectFiles(cfg.maxTreeEntries)).catch(() => '');
+		// Plan-Modi (Custom Agents) am Marker erkennen; fremde Instructions laufen generisch mit.
+		const marker = parseModeMarker(request.modeInstructions);
+		const planVariant = marker.mode && PLAN_VARIANTS.has(marker.mode) ? marker.mode : null;
+		const customInstructions = !planVariant && marker.instructions ? marker.instructions : null;
+
+		const cfg = provider.config();
+		let host = null;
+		if (hasWorkspace) {
+			host = new NativeRunHost(stream, {
+				approvalMode: cfg.approvalMode,
+				terminalMode: cfg.terminalMode,
+				commandTimeoutSec: cfg.commandTimeoutSec,
+				maxTreeEntries: cfg.maxTreeEntries,
+				logger
+			});
+			if (activity) {
+				host.activityCallback = () => activity.summary(8, 0);
+			}
+			exitRun = runContexts.enter(request.toolInvocationToken, { host, signal: abort.signal });
+		}
+
+		const fileTree = hasWorkspace
+			? await Promise.resolve(host.listProjectFiles(cfg.maxTreeEntries)).catch(() => '')
+			: '';
 		let activitySummary;
 		try {
 			activitySummary = activity ? String(activity.summary(8, 0) || '') : undefined;
 		} catch (_e) { activitySummary = undefined; }
 
-		const systemPrompt = [
-			buildSystemPrompt({
-				rootName: host.rootName,
-				platform: `${process.platform} (${process.arch})`,
-				fileTree,
-				approvalMode: cfg.approvalMode,
-				shell: process.platform === 'win32' ? 'cmd/PowerShell' : 'sh',
-				activity: activitySummary,
-				today: new Date().toLocaleDateString('de-DE', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
-			}),
-			buildNativeModeNotes(mode)
-		].join('\n\n');
+		const promptCtx = {
+			rootName: hasWorkspace ? host.rootName : '(kein Ordner geöffnet)',
+			platform: `${process.platform} (${process.arch})`,
+			fileTree,
+			approvalMode: cfg.approvalMode,
+			shell: process.platform === 'win32' ? 'cmd/PowerShell' : 'sh',
+			activity: activitySummary,
+			today: new Date().toLocaleDateString('de-DE', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+		};
+		const noWorkspaceNotes = hasWorkspace ? [] : [NO_WORKSPACE_NOTES];
+		const systemPrompt = planVariant
+			? [buildPlanPrompt(planVariant, promptCtx), ...noWorkspaceNotes].join('\n\n')
+			: [
+				buildSystemPrompt(promptCtx),
+				buildNativeModeNotes(),
+				...(customInstructions ? ['== Additional instructions from the selected custom agent ==', customInstructions] : []),
+				...noWorkspaceNotes
+			].join('\n\n');
 
-		logger.info(`Nativer ${mode}-Lauf gestartet (Modell: ${client.model}, Freigaben: ${cfg.approvalMode}).`);
+		const modeLabel = planVariant || 'agent';
+		logger.info(`Nativer ${modeLabel}-Lauf gestartet (Modell: ${client.model}, Freigaben: ${cfg.approvalMode}).`);
 		const run = new AgentRun({
 			client,
-			host,
+			host: host || {},
 			systemPrompt,
 			maxIterations: cfg.maxIterations,
 			signal: abort.signal,
 			history: historyToContents(simplifyHistory(chatContext && chatContext.history)),
-			toolDeclarations: declarationsForMode(mode, toolsMapToNames(request.tools)),
+			// Ohne Workspace KEINE Deklarationen: Der Lauf ist rein konversationell
+			// (AgentRun lässt das tools-Feld dann komplett weg).
+			toolDeclarations: hasWorkspace ? declarationsForMode(planVariant || 'agent', toolsMapToNames(request.tools)) : [],
 			invokeTool: (name, args) => invokeNativeTool(request, name, args, token),
 			ui: {
 				assistantText: (t) => stream.markdown(`${t}\n\n`),
@@ -228,13 +221,20 @@ async function handleAgentRequest(deps, mode, request, chatContext, stream, toke
 		if (result.status === 'completed' && result.summary) {
 			stream.markdown(`${result.summary}\n\n`);
 		}
-		logger.info(`Nativer ${mode}-Lauf beendet (Status: ${result.status}, gestreamte Edits: ${host.streamedEdits.size}).`);
+		if (!hasWorkspace) {
+			// Zwei klare Wege für Einsteiger direkt unter der Antwort.
+			try {
+				stream.button({ command: 'vscodiumAgent.createWorkspace', title: 'Neuen Projektordner anlegen' });
+				stream.button({ command: 'workbench.action.files.openFolder', title: 'Vorhandenen Ordner öffnen…' });
+			} catch (_e) { /* Buttons sind Komfort */ }
+		}
+		logger.info(`Nativer ${modeLabel}-Lauf beendet (Status: ${result.status}, gestreamte Edits: ${host ? host.streamedEdits.size : 0}).`);
 		return result.status === 'error'
 			? { errorDetails: { message: result.summary || 'Agent-Lauf fehlgeschlagen.' } }
 			: {};
 	} catch (err) {
 		if (abort.signal.aborted || token.isCancellationRequested) { return {}; }
-		logger.error(`Nativer ${mode}-Lauf fehlgeschlagen`, err);
+		logger.error('Nativer Agent-Lauf fehlgeschlagen', err);
 		stream.markdown(`**Fehler:** ${err.message}${err.hint ? `\n\n_${err.hint}_` : ''}`);
 		return { errorDetails: { message: String(err.message || err) } };
 	} finally {
@@ -287,39 +287,61 @@ function registerModelProvider(context, provider, logger) {
 	}
 	try {
 		const disposable = vscode.lm.registerLanguageModelChatProvider(MODEL_VENDOR, {
-			/** Proxy-Katalog → Picker-Einträge; ohne Anmeldung leer (kein Login-Prompt von hier). */
+			/**
+			 * Proxy-Katalog → Picker-Einträge. Ohne Anmeldung liefern wir einen
+			 * Platzhalter: Die UI verlangt zwingend ein Modell pro Request – mit
+			 * leerer Liste scheitern Anfragen VOR dem Participant mit „Language
+			 * model unavailable“ (Probefahrt-Befund). Über den Platzhalter landet
+			 * die Anfrage bei uns und führt freundlich zur Anmeldung.
+			 */
 			async provideLanguageModelChatInformation(_options, _token) {
 				try {
-					if (!provider.auth || !await provider.auth.isSignedIn()) { return []; }
-					const models = await provider._proxyModels();
-					if (!Array.isArray(models)) { return []; }
-					return models.map((m) => ({
-						id: m.id,
-						name: m.label || m.id,
-						family: MODEL_VENDOR,
-						version: '1.0',
-						// Der Proxy-Katalog liefert (noch) keine Token-Limits – konservative
-						// Platzhalter; die tatsächliche Begrenzung erzwingt der Proxy.
-						maxInputTokens: 200000,
-						maxOutputTokens: 64000,
-						// toolCalling MUSS true sein: Agent-Modus (und Inline-Chat) filtern den
-						// Picker auf diese Fähigkeit (languageModels.ts suitableForAgentMode) –
-						// mit false ist die Modell-Liste leer und der Chat meldet „Language model
-						// unavailable“. Die Modelle KÖNNEN Tools (der Proxy übersetzt Function
-						// Calling nativ); die Durchleitung von options.tools in
-						// provideLanguageModelChatResponse für FREMDE Konsumenten ist ein
-						// späteres Arbeitspaket (unser eigener Agent-Loop nutzt diesen Pfad nicht).
-						capabilities: { toolCalling: true, imageInput: false },
-						detail: m.region ? `Region: ${m.region}` : undefined,
-						tooltip: 'VSCodium Agent-Proxy (Vertex AI)'
-					}));
+					const signedIn = provider.auth && await provider.auth.isSignedIn();
+					if (signedIn) {
+						const models = await provider._proxyModels();
+						if (Array.isArray(models) && models.length > 0) {
+							return models.map((m) => ({
+								id: m.id,
+								name: m.label || m.id,
+								family: MODEL_VENDOR,
+								version: '1.0',
+								// Der Proxy-Katalog liefert (noch) keine Token-Limits – konservative
+								// Platzhalter; die tatsächliche Begrenzung erzwingt der Proxy.
+								maxInputTokens: 200000,
+								maxOutputTokens: 64000,
+								// toolCalling MUSS true sein: Agent-Modus (und Inline-Chat) filtern den
+								// Picker auf diese Fähigkeit (languageModels.ts suitableForAgentMode) –
+								// mit false ist die Modell-Liste leer und der Chat meldet „Language model
+								// unavailable“. Die Modelle KÖNNEN Tools (der Proxy übersetzt Function
+								// Calling nativ); die Durchleitung von options.tools in
+								// provideLanguageModelChatResponse für FREMDE Konsumenten ist ein
+								// späteres Arbeitspaket (unser eigener Agent-Loop nutzt diesen Pfad nicht).
+								capabilities: { toolCalling: true, imageInput: false },
+								detail: m.region ? `Region: ${m.region}` : undefined,
+								tooltip: 'VSCodium Agent-Proxy (Vertex AI)'
+							}));
+						}
+					}
 				} catch (err) {
 					logger.warn('Nativer Chat: Modell-Katalog für den Picker nicht abrufbar.', err);
-					return [];
 				}
+				return [{
+					id: SIGN_IN_MODEL_ID,
+					name: 'Anmelden erforderlich',
+					family: MODEL_VENDOR,
+					version: '1.0',
+					maxInputTokens: 1000,
+					maxOutputTokens: 1000,
+					capabilities: { toolCalling: true, imageInput: false },
+					detail: 'Kommando „Agent: Mit Google anmelden“',
+					tooltip: 'Anmelden, um die Gemini- und Claude-Modelle des Agent-Proxys zu laden.'
+				}];
 			},
 
 			async provideLanguageModelChatResponse(model, messages, _options, progress, token) {
+				if (model.id === SIGN_IN_MODEL_ID) {
+					throw new Error('Nicht angemeldet – bitte das Kommando „Agent: Mit Google anmelden“ ausführen und erneut senden.');
+				}
 				const abort = new AbortController();
 				const cancellation = token.onCancellationRequested(() => abort.abort());
 				try {
@@ -352,8 +374,7 @@ function registerModelProvider(context, provider, logger) {
 
 module.exports = {
 	registerNativeChat,
-	PARTICIPANT_ID,
-	EDIT_PARTICIPANT_ID,
 	AGENT_PARTICIPANT_ID,
-	MODEL_VENDOR
+	MODEL_VENDOR,
+	SIGN_IN_MODEL_ID
 };

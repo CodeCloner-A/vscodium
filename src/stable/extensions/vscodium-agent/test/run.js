@@ -26,8 +26,11 @@ const { AuthManager, AUTH_SECRET_KEY } = require('../lib/authManager');
 const { ProxyClient, formatUsage } = require('../lib/proxyClient');
 const { workspaceKey, validRemoteSession, planSync } = require('../lib/sessionSync');
 const { buildAskRequest, buildAskSystemText, historyToContents, simplifyHistory, lmMessagesToContents, streamAskResponse, MAX_HISTORY_TURNS } = require('../lib/nativeChat');
-const { NATIVE_LM_TOOLS, EDIT_MODE_TOOLS, declarationsForMode, toolsMapToNames, toolConfirmation, toolInvocationMessage, toolResultToText, parseToolResultText, lmResultToText, buildNativeModeNotes } = require('../lib/nativeChat');
+const { NATIVE_LM_TOOLS, PLAN_MODE_TOOLS, parseModeMarker, declarationsForMode, toolsMapToNames, toolConfirmation, toolInvocationMessage, toolResultToText, parseToolResultText, lmResultToText, buildNativeModeNotes, NO_WORKSPACE_NOTES } = require('../lib/nativeChat');
+const { buildPlanPrompt, LANGUAGE_RULE } = require('../lib/prompts');
 const { TOOL_DECLARATIONS } = require('../lib/tools');
+const fs = require('fs');
+const path = require('path');
 const manifest = require('../package.json');
 
 // ── Mock-Host (In-Memory-Dateisystem) ──────────────────────────────────────
@@ -1037,11 +1040,13 @@ async function testNativeAgentMode() {
 	assert.ok(filtered.includes('task_complete'));
 	assert.strictEqual(filtered.length, allNames.length - 1);
 
-	// Edit-Modus: nur die Edit-Teilmenge (keine Kommandos, kein Löschen, keine Aktivität).
-	const editNames = declarationsForMode('edit', undefined).map(d => d.name);
-	assert.deepStrictEqual(new Set(editNames), EDIT_MODE_TOOLS);
-	assert.ok(!editNames.includes('run_command') && !editNames.includes('delete_file') && !editNames.includes('get_recent_activity'));
-	assert.ok(!declarationsForMode('edit', { write_file: false }).some(d => d.name === 'write_file'));
+	// Plan-Modi: nur die Lese-Teilmenge (kein Schreiben, kein Löschen, keine Kommandos).
+	for (const planMode of ['plan', 'plan-extended']) {
+		const planNames = declarationsForMode(planMode, undefined).map(d => d.name);
+		assert.deepStrictEqual(new Set(planNames), PLAN_MODE_TOOLS, `Plan-Toolset weicht ab (${planMode})`);
+		assert.ok(!planNames.includes('write_file') && !planNames.includes('replace_in_file') && !planNames.includes('delete_file') && !planNames.includes('run_command'));
+	}
+	assert.ok(!declarationsForMode('plan', { read_file: false }).some(d => d.name === 'read_file'));
 
 	// request.tools (Map<Info, boolean>) → { name: boolean }; Nicht-Maps sind harmlos.
 	const toolsMap = new Map([
@@ -1073,11 +1078,44 @@ async function testNativeAgentMode() {
 	assert.deepStrictEqual(parseToolResultText('42'), { output: 42 });
 	assert.strictEqual(lmResultToText({ content: [{ value: '{"a"' }, { value: ':1}' }, { andere: true }] }), '{"a":1}');
 
-	// Modus-Regeln für den System-Prompt.
-	const editNotes = buildNativeModeNotes('edit');
-	assert.ok(editNotes.includes('EDIT mode') && editNotes.includes('NOT run commands'));
-	const agentNotes = buildNativeModeNotes('agent');
-	assert.ok(agentNotes.includes('pending changes') && !agentNotes.includes('EDIT mode'));
+	// Agent-Notes fürs native Review + Marker-Erkennung der Plan-Modi.
+	const agentNotes = buildNativeModeNotes();
+	assert.ok(agentNotes.includes('pending changes'));
+	assert.deepStrictEqual(parseModeMarker('<!-- vscodium-agent:mode=plan -->\n\nDu planst.'), { mode: 'plan', instructions: 'Du planst.' });
+	assert.strictEqual(parseModeMarker('x <!--vscodium-agent:mode=plan-extended--> y').mode, 'plan-extended');
+	assert.deepStrictEqual(parseModeMarker('Eigene Regeln ohne Marker.'), { mode: null, instructions: 'Eigene Regeln ohne Marker.' });
+	assert.deepStrictEqual(parseModeMarker(undefined), { mode: null, instructions: '' });
+
+	// Die ausgelieferten .agent.md-Dateien: Marker vorhanden, Frontmatter-Tools ⊆ Plan-Toolset.
+	const agentFiles = manifest.contributes.chatAgents.map(a => a.path);
+	assert.deepStrictEqual(agentFiles, ['./agents/plan.agent.md', './agents/erweiterter-plan.agent.md']);
+	const expectedMarkers = { './agents/plan.agent.md': 'plan', './agents/erweiterter-plan.agent.md': 'plan-extended' };
+	for (const rel of agentFiles) {
+		const content = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+		assert.strictEqual(parseModeMarker(content).mode, expectedMarkers[rel], `Marker fehlt/falsch in ${rel}`);
+		const toolsLine = content.match(/^tools:\s*\[(.*)\]$/m);
+		assert.ok(toolsLine, `tools-Frontmatter fehlt in ${rel}`);
+		const fmTools = toolsLine[1].split(',').map(s => s.trim().replace(/^'|'$/g, ''));
+		for (const t of fmTools) {
+			assert.ok(PLAN_MODE_TOOLS.has(t) && t !== 'task_complete', `Frontmatter-Tool ${t} gehört nicht zum Plan-Toolset (${rel})`);
+		}
+		// Plan → Agent-Übergabe: Handoff mit Auto-Send auf den Builtin-Agent.
+		assert.ok(/handoffs:/m.test(content) && /agent: agent/m.test(content) && /send: true/m.test(content), `Handoff fehlt/unvollständig in ${rel}`);
+		assert.ok(content.includes('Plan umsetzen'), `Handoff-Label fehlt in ${rel}`);
+	}
+	// Die Prompts verweisen auf den Knopf statt auf manuelles Mode-Wechseln.
+	assert.ok(buildPlanPrompt('plan', { rootName: 'x', platform: 'x', fileTree: '' }).includes('Plan umsetzen'));
+	assert.ok(buildPlanPrompt('plan-extended', { rootName: 'x', platform: 'x', fileTree: '' }).includes('Plan umsetzen'));
+
+	// Plan-Prompts: Lese-Grenzen, Varianten-Regeln, Sprachregel.
+	const planPrompt = buildPlanPrompt('plan', { rootName: 'demo', platform: 'win32', fileTree: 'a.js' });
+	assert.ok(planPrompt.includes('READ-ONLY') && planPrompt.includes('can NOT edit'));
+	assert.ok(planPrompt.includes('bundle them into one short message'));
+	assert.ok(!planPrompt.includes('EXACTLY ONE question'));
+	const grillPrompt = buildPlanPrompt('plan-extended', { rootName: 'demo', platform: 'win32', fileTree: 'a.js' });
+	assert.ok(grillPrompt.includes('EXACTLY ONE question') && grillPrompt.includes('relentlessly') && grillPrompt.includes('recommended answer'));
+	assert.ok(planPrompt.includes(LANGUAGE_RULE) && grillPrompt.includes(LANGUAGE_RULE));
+	assert.ok(LANGUAGE_RULE.includes('Never switch to English') && LANGUAGE_RULE.includes('never "Sie"'));
 
 	// Manifest ↔ Deklarationen: languageModelTools und TOOL_DECLARATIONS bleiben synchron.
 	const manifestTools = new Map((manifest.contributes.languageModelTools || []).map(t => [t.name, t]));
@@ -1100,15 +1138,18 @@ async function testNativeAgentMode() {
 		}
 		assert.deepStrictEqual(m.inputSchema.required || [], decl.parameters.required || [], `required weicht ab: ${decl.name}`);
 		assert.ok(m.displayName && m.userDescription, `displayName/userDescription fehlt: ${decl.name}`);
+		// Tool-Picker-Teilnahme: ohne canBeReferencedInPrompt fehlen die Tools in der
+		// Enablement-Map der UI (entriesMap filtert darauf) – Abwahl bliebe wirkungslos.
+		assert.strictEqual(m.canBeReferencedInPrompt, true, `canBeReferencedInPrompt fehlt: ${decl.name}`);
+		assert.strictEqual(m.toolReferenceName, decl.name, `toolReferenceName weicht ab: ${decl.name}`);
 	}
 
-	// Drei Default-Participants, einer pro Modus (Muster der Core-Setup-Agents).
+	// EIN Default-Participant (Agent-Modus; Ask/Edit sind upstream abgekündigt,
+	// die Plan-Modi kommen als Custom Agents über contributes.chatAgents).
 	const participants = manifest.contributes.chatParticipants;
 	assert.deepStrictEqual(
 		participants.map(p => [p.id, p.isDefault, ...(p.modes || [])]),
 		[
-			['vscodium-agent.default', true, 'ask'],
-			['vscodium-agent.edit', true, 'edit'],
 			['vscodium-agent.agent', true, 'agent']
 		]
 	);
@@ -1153,7 +1194,46 @@ async function testNativeAgentMode() {
 	const fr = responseTurn.parts.find(p => p.functionResponse && p.functionResponse.name === 'run_command').functionResponse.response;
 	assert.strictEqual(fr.status, 'rejected');
 
-	console.log('✔ Nativer Agent-Modus: Deklarations-Filter, Freigabe-Metadaten, Ergebnis-Roundtrip, Manifest-Sync, Loop mit injizierten Tools');
+	// Netz-Resilienz: Ein Fehler OHNE HTTP-Status (z. B. "fetch failed") wird genau
+	// einmal wiederholt, der Lauf läuft danach normal weiter …
+	let flakyCalls = 0;
+	const flakyClient = {
+		async generateContent() {
+			flakyCalls++;
+			if (flakyCalls === 1) { throw new Error('fetch failed'); }
+			return { candidates: [{ content: { role: 'model', parts: [{ text: 'Da bin ich wieder.' }] }, finishReason: 'STOP' }] };
+		}
+	};
+	const retryUi = collectorUi();
+	const retryRun = new AgentRun({ client: flakyClient, host: {}, ui: retryUi, systemPrompt: 't', retryDelayMs: 0 });
+	const retryOutcome = await retryRun.run('Sag hallo.');
+	assert.strictEqual(retryOutcome.status, 'completed');
+	assert.strictEqual(flakyCalls, 2);
+	assert.ok(retryUi.events.some(e => e[0] === 'info' && String(e[1]).includes('Verbindungsproblem')));
+
+	// … Server-Antworten (Status gesetzt, z. B. Quota-429) dagegen nicht.
+	const statusClient = { async generateContent() { const e = new Error('Kontingent erschöpft'); e.status = 429; throw e; } };
+	const statusUi = collectorUi();
+	const statusRun = new AgentRun({ client: statusClient, host: {}, ui: statusUi, systemPrompt: 't', retryDelayMs: 0 });
+	assert.strictEqual((await statusRun.run('x')).status, 'error');
+	assert.ok(statusUi.events.some(e => e[0] === 'error'));
+
+	// Zwei Netzfehler in Folge → error (es gibt nur EINEN Wiederholversuch).
+	const doubleClient = { async generateContent() { throw new Error('fetch failed'); } };
+	const doubleRun = new AgentRun({ client: doubleClient, host: {}, ui: collectorUi(), systemPrompt: 't', retryDelayMs: 0 });
+	assert.strictEqual((await doubleRun.run('x')).status, 'error');
+
+	// Chat ohne Workspace: keine Deklarationen → Request ganz OHNE tools-Feld,
+	// der Lauf ist rein konversationell; die Einsteiger-Führung steht in den Notes.
+	const bareClient = scriptedClient([[{ text: 'Gern – öffne zuerst über „Datei → Ordner öffnen…“ einen Ordner.' }]]);
+	const bareRun = new AgentRun({ client: bareClient, host: {}, ui: collectorUi(), systemPrompt: 't', toolDeclarations: [], retryDelayMs: 0 });
+	assert.strictEqual((await bareRun.run('Bau mir eine App.')).status, 'completed');
+	assert.strictEqual(bareClient.requests[0].tools, undefined);
+	assert.strictEqual(bareClient.requests[0].toolConfig, undefined);
+	assert.ok(NO_WORKSPACE_NOTES.includes('Neuen Projektordner anlegen') && NO_WORKSPACE_NOTES.includes('Never call tools'));
+	assert.ok(manifest.contributes.commands.some(c => c.command === 'vscodiumAgent.createWorkspace'), 'createWorkspace-Kommando fehlt im Manifest');
+
+	console.log('✔ Nativer Agent-Modus: Plan-Toolsets, Marker + .agent.md-Sync, Plan-Prompts, Freigabe-Metadaten, Manifest-Sync, Loop mit injizierten Tools, Netz-Retry');
 }
 
 async function main() {

@@ -161,14 +161,36 @@ function safeExtractText(response) {
 // ── Nativer Agent-/Edit-Modus (Phase K, Inkrement 2) ─────────────────────────
 
 /**
- * Tools, die der Edit-Modus anbietet: lesen, suchen, editieren – keine Kommandos,
- * kein Löschen. Der Edit-Modus ist der "kleine" Agent für gezielte Änderungen.
+ * Tools der Plan-Modi (Entscheid 17.07.2026): reines Lesen – erkunden, fragen,
+ * planen. Kein Schreiben, kein Löschen, keine Kommandos. `task_complete` bleibt
+ * als Kontrollfluss-Abschluss erhalten.
  */
-const EDIT_MODE_TOOLS = new Set([
+const PLAN_MODE_TOOLS = new Set([
 	'list_files', 'read_file', 'search_project',
-	'write_file', 'replace_in_file',
-	'get_diagnostics', 'task_complete'
+	'get_diagnostics', 'get_recent_activity', 'task_complete'
 ]);
+
+/** Marker in den .agent.md-Instructions, an dem der Handler unsere Modi erkennt. */
+const MODE_MARKER_RE = /<!--\s*vscodium-agent:mode=([a-z][a-z0-9-]*)\s*-->/;
+
+/**
+ * Modus-Marker aus `request.modeInstructions` ziehen (Inhalt der .agent.md).
+ *
+ * Der Marker ist der API-risikofreie Erkennungskanal: Die UI-Mechanik für
+ * Custom-Agent-Tool-Listen kann sich ändern – der Instructions-Text kommt aber
+ * immer an, und die Tool-Beschränkung wird serverseitig hart erzwungen.
+ *
+ * @param {string|undefined} instructions
+ * @returns {{ mode: string|null, instructions: string }} mode (z. B. 'plan',
+ *   'plan-extended') oder null; instructions ohne Marker-Zeile (für generische
+ *   Custom Agents, die kein Marker tragen: unverändert).
+ */
+function parseModeMarker(instructions) {
+	const text = String(instructions || '');
+	const match = text.match(MODE_MARKER_RE);
+	if (!match) { return { mode: null, instructions: text.trim() }; }
+	return { mode: match[1], instructions: text.replace(MODE_MARKER_RE, '').trim() };
+}
 
 /** Tools, die im nativen Modus über vscode.lm.invokeTool laufen (alle außer task_complete). */
 const NATIVE_LM_TOOLS = TOOL_DECLARATIONS.map(d => d.name).filter(n => n !== 'task_complete');
@@ -182,14 +204,15 @@ const NATIVE_LM_TOOLS = TOOL_DECLARATIONS.map(d => d.name).filter(n => n !== 'ta
  * `enabledByName` (Tools fremder Extensions) sind irrelevant – gefiltert wird nur,
  * was wir selbst deklarieren.
  *
- * @param {'agent'|'edit'} mode
+ * @param {'agent'|'plan'|'plan-extended'} mode
  * @param {Record<string, boolean>|undefined} enabledByName
  * @returns {Array<object>} Teilmenge von TOOL_DECLARATIONS
  */
 function declarationsForMode(mode, enabledByName) {
+	const planMode = mode === 'plan' || mode === 'plan-extended';
 	return TOOL_DECLARATIONS.filter((decl) => {
 		if (decl.name === 'task_complete') { return true; }
-		if (mode === 'edit' && !EDIT_MODE_TOOLS.has(decl.name)) { return false; }
+		if (planMode && !PLAN_MODE_TOOLS.has(decl.name)) { return false; }
 		if (enabledByName && enabledByName[decl.name] === false) { return false; }
 		return true;
 	});
@@ -282,24 +305,29 @@ function lmResultToText(lmResult) {
 }
 
 /**
- * Modus-spezifische Zusatzregeln für den System-Prompt des nativen Chats.
- * Der Agent-Modus erbt den vollen System-Prompt (prompts.buildSystemPrompt);
- * diese Zeilen erklären, wie Review im nativen Chat-Editing aussieht.
- * @param {'agent'|'edit'} mode
+ * Zusatzregeln für Läufe OHNE geöffneten Workspace-Ordner: Der Chat bleibt voll
+ * gesprächsfähig (Fragen, Erklärungen, Code-Beispiele) – nur die Datei-/Kommando-
+ * Werkzeuge fehlen. Einsteiger werden bei Bedarf zum Ordner-Öffnen geführt,
+ * ohne Fachbegriffe wie „Workspace“ vorauszusetzen.
  */
-function buildNativeModeNotes(mode) {
-	const common = [
+const NO_WORKSPACE_NOTES = [
+	'== No folder open ==',
+	'No project folder is open in this window, so ALL file and command tools are unavailable for this conversation. Never call tools and never claim you created, changed or ran anything.',
+	'You can still answer questions, explain concepts and show code as fenced code blocks – do that normally.',
+	'Only when the user wants you to work on files or build something in their project: explain in one friendly beginner-proof sentence (do NOT assume they know terms like "workspace") that they first need a project folder. Below your answer the UI shows two buttons – "Neuen Projektordner anlegen" (creates and opens one for them) and "Vorhandenen Ordner öffnen…" – point them there; afterwards they simply re-send their request.'
+].join('\n');
+
+/**
+ * Zusatzregeln für den Agent-Modus im nativen Chat: erklären, wie das
+ * Multi-File-Review im Chat-Editing funktioniert (der volle System-Prompt
+ * kommt aus prompts.buildSystemPrompt).
+ */
+function buildNativeModeNotes() {
+	return [
 		'== Native chat notes ==',
 		'File edits you make appear as pending changes in the editor (multi-file review): the user accepts or rejects them per file after your run. Rejected changes are NOT on disk – never assume an earlier rejected edit exists.',
 		'Do not print full file contents in chat after editing; the review view already shows the diff.'
-	];
-	if (mode === 'edit') {
-		return [
-			...common,
-			'You are in EDIT mode: a focused editing assistant. You can read, search and edit files, and check diagnostics – you can NOT run commands or delete files here. For tasks that need command execution, tell the user to switch to Agent mode.'
-		].join('\n');
-	}
-	return common.join('\n');
+	].join('\n');
 }
 
 module.exports = {
@@ -311,8 +339,9 @@ module.exports = {
 	lmMessagesToContents,
 	buildAskRequest,
 	streamAskResponse,
-	EDIT_MODE_TOOLS,
+	PLAN_MODE_TOOLS,
 	NATIVE_LM_TOOLS,
+	parseModeMarker,
 	declarationsForMode,
 	toolsMapToNames,
 	toolConfirmation,
@@ -320,5 +349,6 @@ module.exports = {
 	toolResultToText,
 	parseToolResultText,
 	lmResultToText,
-	buildNativeModeNotes
+	buildNativeModeNotes,
+	NO_WORKSPACE_NOTES
 };

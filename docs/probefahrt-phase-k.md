@@ -149,7 +149,7 @@ Daraus wird dann die Fixliste für die nächste Session. Wenn alles grün ist: G
 
 **Bestanden:** Build inkl. Verdrahtung (product.json, Patch 85, Extension v0.13.0 als Builtin, Copilot entfernt); Registrierung sauber (9/9 Tools, alle drei Participants, Modell-Provider; Extension Host ohne „CANNOT"-Fehler); Agent-Modus end-to-end — Projektverständnis, Kommentar-Edits, Ordner anlegen, Datei löschen inkl. Wiederherstellen über das Review, Tool-Cards; Modell-Picker mit Proxy-Angebot (nach `toolCalling`-Fix); Auto-Modus ohne Nachfragen; Anmeldung + Proxy-Verkehr; **D4/Punkt 11: Kommandos sehen per Datei-Werkzeug gestreamte Edits sofort auf der Platte** (`type` lieferte den frischen Inhalt, Beleg: `"stdout":"TEST 123\r\n"`) — kein zusätzliches Speichern vor `run_command` nötig.
 
-**Fixliste für das nächste Inkrement:**
+**Fixliste für das nächste Inkrement** *(Stand 20.07.2026: Punkte 1, 2, 3 und 5 umgesetzt in v0.14.0 — Plan-Modi via `agents/*.agent.md`, Anmelde-Platzhalter mit Button, 1×-Loop-Retry, verschärfte Sprachregel; offen bleibt Punkt 4)*:
 
 1. **Plan-Modi statt Ask/Edit** (Entscheid, siehe ROADMAP Phase K): „Plan" + „Erweiterter Plan" als native Picker-Einträge; ask/edit-Participants zurückbauen. Ask/Edit sind implementiert und registriert (Log belegt es), haben aber upstream-bedingt keinen UI-Zugang mehr.
 2. **Anmelde-Hinweis statt „Language model unavailable":** Ohne Anmeldung braucht der Modell-Provider einen Platzhalter-Eintrag, damit Anfragen bei unserem Participant landen und freundlich zur Anmeldung führen.
