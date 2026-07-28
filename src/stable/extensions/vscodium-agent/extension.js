@@ -7,6 +7,8 @@
 const vscode = require('vscode');
 const { ChatViewProvider } = require('./ui/chatViewProvider');
 const { registerNativeChat } = require('./ui/nativeChatController');
+const { registerActivitySignal } = require('./ui/activitySignalController');
+const { registerAttachFromComputer } = require('./ui/attachFromComputer');
 const { InlineEditController } = require('./ui/inlineEditController');
 const { AgentCodeActionProvider } = require('./ui/codeActions');
 const { DIFF_SCHEME, EXCLUDED_DIRS } = require('./lib/workspaceHost');
@@ -302,6 +304,10 @@ function activate(context) {
 	// Secondary Sidebar + Proxy-Modelle im nativen Picker). Auf fremden Basen
 	// scheitert die Registrierung kontrolliert; die Webview bleibt dann Träger.
 	registerNativeChat(context, provider, activity, logger);
+
+	// ── KEEP IT SIMPLE: sichtbare Aktivität + einsteigerfreundlicher Datei-Anhang ──
+	registerActivitySignal(context, logger);
+	registerAttachFromComputer(context, logger);
 
 	// Agent-Chat beim IDE-Start automatisch öffnen (wie in agentischen IDEs üblich).
 	const cfg = vscode.workspace.getConfiguration('vscodiumAgent');

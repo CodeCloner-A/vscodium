@@ -72,7 +72,7 @@ cd /c/Users/ergin/Desktop/VSCode-Fork/vscodium
 
 1. Öffne im Windows-Explorer: `C:\Users\ergin\Desktop\VSCode-Fork\vscodium\VSCode-win32-x64`
 2. **Bevor** du etwas startest: Lege in diesem Ordner einen neuen, leeren Ordner namens **`data`** an (Rechtsklick → Neu → Ordner). Dadurch läuft die Test-Version „portabel" — sie speichert alles bei sich und funkt deiner normalen Installation nicht dazwischen.
-3. Doppelklick auf **`VSCodium.exe`** (falls die Datei minimal anders heißt: die eine große .exe im Ordner).
+3. Doppelklick auf **`PHI47.exe`** (seit v0.16.0 — davor hieß sie `VSCodium.exe`; falls die Datei minimal anders heißt: die eine große .exe im Ordner).
 4. Lege dir eine **Spielwiese** an: einen neuen Ordner `C:\Users\ergin\Desktop\probefahrt-spielwiese` (leer ist okay). Öffne ihn in der Test-Version: Datei → Ordner öffnen.
 5. Es kommt eine Frage, ob du dem Ordner **vertraust** → **„Ja, ich vertraue den Autoren"**. (Ohne Vertrauen darf der Agent keine Dateien anfassen — das ist Absicht.)
 
@@ -155,6 +155,7 @@ Daraus wird dann die Fixliste für die nächste Session. Wenn alles grün ist: G
 2. **Anmelde-Hinweis statt „Language model unavailable":** Ohne Anmeldung braucht der Modell-Provider einen Platzhalter-Eintrag, damit Anfragen bei unserem Participant landen und freundlich zur Anmeldung führen.
 3. **Netz-Resilienz (Start UND Lauf):** Beim App-Start schlugen Katalog-Abruf und Sitzungs-Sync einmalig fehl („Agent-Proxy nicht erreichbar: fetch failed") — die Fallbacks griffen, aber es fehlt ein automatischer zweiter Versuch, sobald das Netz steht (Folge-Symptom: „Could not find model … in local cache", Core löst selbst nach). Zusätzlich brach bei der D4-Probe Lauf 1 mit Status `error` ab — mutmaßlich ein einzelner fehlgeschlagener Modell-Aufruf bei der Abschlussantwort (die Chat-Antwort riss mitten im Satz ab); der Loop sollte einzelne Aufruf-Fehler einmal wiederholen, statt den Lauf zu beenden. Lauf 2 (identischer Auftrag) lief fehlerfrei durch.
 
+4a. **Sessions-Ansicht (geparkt, 20.07.):** Auch mit `chat.viewSessions.orientation: stacked` entspricht das Verhalten nicht dem Wunschbild (Liste soll den Chat überlappen statt ihn zu verschieben; Sessions-Symbol erscheint erst nach der ersten Nachricht). Nativer Spielraum ausgereizt → Design-Patch-Kandidat für die Produkt-Identitäts-Runde (Core-CSS/Layout, update-sensibel).
 4. **Chat-Scrolling/Verdeckung am Antwort-Ende:** Unter der letzten Antwort lässt sich nicht weit genug scrollen — die Aktions-Icons (Erneut, Kopieren, Daumen) sind nicht erreichbar; mutmaßlich verdeckt dasselbe Layout-Problem auch die Fortfahren/Abbrechen-Knöpfe der Freigabe-Karten (Workaround: Panel vergrößern bzw. „Input"-Bereich der Karte zuklappen). Prüfen, ob Upstream-Bug oder Folge unseres Setups.
 5. **Deutsche Zwischentexte:** Die Zwischen-Schritte des Agenten kamen englisch („I will first search …"), obwohl der System-Prompt Deutsch verlangt — Prompt nachschärfen (gilt v. a. für Gemini).
 

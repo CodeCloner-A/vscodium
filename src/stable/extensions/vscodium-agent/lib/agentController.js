@@ -123,7 +123,9 @@ class AgentRun {
 			const functionCalls = parts.filter(p => p.functionCall && p.functionCall.name);
 			if (functionCalls.length === 0) {
 				// Kein Tool-Aufruf → Modell hat konversationell geantwortet; Aufgabe gilt als beendet.
-				return { status: 'completed', summary: textParts.map(p => p.text).join('\n') };
+				// viaText: Die Summary wurde bereits über ui.assistantText ausgegeben – Anzeiger
+				// dürfen sie nicht erneut rendern (sonst doppelte Antwort im nativen Chat).
+				return { status: 'completed', summary: textParts.map(p => p.text).join('\n'), viaText: true };
 			}
 
 			const responseParts = [];

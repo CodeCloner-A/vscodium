@@ -4,6 +4,25 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.16.0] – 2026-07-28
+
+### Hinzugefügt
+- **PHI47-Branding nach dem Design-Entwurf:** Das Produkt heißt jetzt **PHI47** — Fenstertitel, Anwendungsname (`phi47`), Windows-Bezeichner und Datenordner kommen aus der `product.json` des Forks (sie wird beim Build zuletzt gemerged und überschreibt die VSCodium-Namen — kein Patch nötig).
+- **Farbthema „PHI47 Dark" (Standard):** 289 Oberflächenfarben plus Syntax- und Semantik-Token aus dem Entwurf — Gold `#E0B84A` als Akzent (aktiver Tab, Aktivitätsleiste, Knöpfe, Fortschritt), Flächen `#0F1115` / `#14161B`, Rahmen `#23262E`, Terminal-Palette mit Grün `#8FBF6F`, Blau `#7FB2E5`, Rot `#E5646E`. Wird per `configurationDefaults` als Standard gesetzt und ist im Theme-Picker wählbar.
+- **φ-Marke:** Das Agent-Icon ist jetzt das PHI47-Zeichen (φ im Kreis, goldener Schnitt als Leitmotiv) statt des generischen Roboter-Symbols.
+- **Typografie:** IBM Plex Mono als Standard für Editor und Terminal (mit Rückfallkette auf Consolas/monospace, falls die Schrift nicht installiert ist).
+- **Leerer Chat spricht PHI47:** Willkommenstext in der Tonalität des Entwurfs („Wohin soll's gehen? … ich plane die Route, schreibe den Code und führe ihn aus") mit drei Startpunkten; dazu ein Beispiel-Prompt am Agent-Participant.
+
+### Geändert
+- Aktivitäts-Signale nutzen die Markenpalette: Gold für laufende Kommandos, Blau für den arbeitenden Agenten.
+
+## [0.15.0] – 2026-07-20
+
+### Hinzugefügt
+- **Sichtbare Aktivität (KEEP IT SIMPLE, Stufe 1):** Solange im Terminal ein Kommando läuft (`flutter run`, `npm run dev`, `gcloud` … – erkannt über die stabilen Shell-Integration-Events, in jedem Terminal) oder ein Agent-/Plan-Lauf aktiv ist, zeigt die Statusleiste einen animierten Hinweis („Agent arbeitet …" / „Kommando läuft …") und die Rahmen färben sich dezent: Terminal-/Panel-Rahmen bei Kommandos, Editor-/Tab-Rahmen, wenn der Agent im Projekt liest oder schreibt. „Da passiert was" – auf einen Blick. Eigene Farbanpassungen des Nutzers werden nie überschrieben und beim Ende sauber zurückgesetzt (`lib/activitySignal.js`, headless getestet). Neue Einstellung `vscodiumAgent.activitySignal` (Standard: an). Stufe 2 (echtes Pulsieren per CSS-Patch) folgt mit der Produkt-Identitäts-Runde.
+- **Frischer Modell-Katalog (Proxy v0.6.0):** `gemini-3.6-flash` („neueste Generation") und `gemini-3.5-flash-lite` („flink & günstig") sind im Angebot; die Claude-Einträge sind vorerst ausgeblendet — die Anthropic-Freischaltung im Model Garden verlangt Firmendaten, und tote Picker-Einträge widersprechen KEEP IT SIMPLE (Übersetzungsschicht bleibt eingebaut und getestet; nach Firmengründung wird nur das `hidden`-Flag entfernt). Kontingent-Gewichte für die neuen Modelle konservativ, bis Listenpreise vorliegen.
+- **„Dateien vom Computer …" im Anhang-Menü:** Der Plus-/Büroklammer-Weg des Chats bekommt einen Eintrag, der das normale „Öffnen"-Fenster öffnet (Mehrfachauswahl) und die gewählten Dateien an den Chat hängt – statt Einsteiger in den Quick-Access zu schicken (Vorbild Antigravity/Cursor; `contributes.chatContext` + Proposal `chatContextProvider` + Core-Kommando `workbench.action.chat.attachFile`; product.json-Allowlist erweitert). Zusätzlich als Kommando „Agent: Dateien vom Computer zum Chat hinzufügen" verfügbar.
+
 ## [0.14.0] – 2026-07-20
 
 ### Hinzugefügt
@@ -13,9 +32,11 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 - **Tools im Tool-Picker steuerbar:** Alle 9 Werkzeuge tragen jetzt `canBeReferencedInPrompt` + `toolReferenceName` – sie erscheinen in der Werkzeug-Auswahl der UI (und sind per `#name` referenzierbar); ohne das Flag nahm die Enablement-Mechanik der UI sie gar nicht erst auf.
 
 ### Behoben
+- **Doppelte Antwort im nativen Chat:** Rein konversationelle Antworten (ohne Werkzeug-Einsatz) erschienen zweimal – der Lauf streamte den Text und gab ihn am Ende nochmals als Zusammenfassung aus (`viaText`-Kennzeichen in `AgentRun`; Probefahrt-Befund 20.07., „Hallo! …" ×2).
 - **Chat ohne Projektordner funktioniert jetzt** (Probefahrt-Befund 20.07.): Statt des harten Fehlers „Kein Workspace-Ordner geöffnet" läuft die Unterhaltung normal weiter – Fragen, Erklärungen, Code-Beispiele –, nur eben ohne Datei-/Kommando-Werkzeuge (der Modell-Request lässt das tools-Feld dann komplett weg). Erst wenn der Nutzer an Dateien arbeiten will, erklärt der Agent einsteigerfreundlich den Weg – ohne Fachbegriffe wie „Workspace" vorauszusetzen – und unter der Antwort erscheinen zwei Knöpfe: **„Neuen Projektordner anlegen"** (fragt nur nach einem Namen, legt den Ordner unter `Dokumente\VSCodium-Projekte\` an und öffnet ihn – neues Kommando `vscodiumAgent.createWorkspace`, läuft ausschließlich auf Klick) und **„Vorhandenen Ordner öffnen…"**.
 
 ### Geändert
+- **Ruhige obere Leiste:** Das Command Center (Quick-Access-Suchfeld in der Titelleiste) ist standardmäßig aus (`window.commandCenter: false` via configurationDefaults) — Leitsatz KEEP IT SIMPLE, Vorbild Antigravity/Cursor; Strg+P/Strg+Umschalt+P funktionieren unverändert.
 - **Sessions-Liste legt sich über den Chat statt nach außen:** Produkt-Default `chat.viewSessions.orientation: "stacked"` (per `configurationDefaults`, kein Core-Patch) — die „Agent Sessions"-Übersicht erscheint gestapelt im Chat-Bereich; wer es anders mag, stellt das Setting um.
 - **Ask- und Edit-Participants entfernt:** Upstream hat die Builtin-Modi Ask/Edit abgekündigt (Picker zeigt sie nicht mehr an); der Agent-Participant (`vscodium-agent.agent`) trägt allein die Chat-View. Ask-Verhalten deckt der Agent-Modus ab, den Edit-Platz nehmen die Plan-Modi ein (Nutzer-Entscheid: kein Edit-Comeback).
 - **Sprachregel verschärft:** Alle sichtbaren Texte – auch Ein-Satz-Ankündigungen vor Tool-Aufrufen – müssen deutsch sein (Probefahrt-Befund: englische Zwischentexte bei Gemini).

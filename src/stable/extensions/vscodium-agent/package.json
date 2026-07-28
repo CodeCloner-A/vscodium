@@ -1,8 +1,8 @@
 {
   "name": "vscodium-agent",
-  "displayName": "VSCodium Agent",
-  "description": "Integrierter KI-Agent (Gemini & Claude über den Agent-Proxy): Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review-Modus.",
-  "version": "0.14.0",
+  "displayName": "PHI47 Agent",
+  "description": "Der Agent von PHI47: Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review.",
+  "version": "0.16.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
@@ -32,15 +32,17 @@
   "main": "./extension.js",
   "enabledApiProposals": [
     "defaultChatParticipant",
-    "chatParticipantAdditions"
+    "chatParticipantAdditions",
+    "chatContextProvider"
   ],
   "contributes": {
     "chatParticipants": [
       {
         "id": "vscodium-agent.agent",
         "name": "agent",
-        "fullName": "VSCodium Agent",
+        "fullName": "PHI47",
         "description": "Autonomer Agent: liest, ändert, testet – mit Multi-File-Review und Tool-Freigaben.",
+        "sampleRequest": "Verschaff dir einen Überblick über dieses Projekt und schlag die nächsten Schritte vor.",
         "isDefault": true,
         "modes": [
           "agent"
@@ -224,9 +226,30 @@
         "displayName": "VSCodium Agent"
       }
     ],
+    "themes": [
+      {
+        "label": "PHI47 Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/phi47-dark.json"
+      }
+    ],
     "configurationDefaults": {
-      "chat.viewSessions.orientation": "stacked"
+      "chat.viewSessions.orientation": "stacked",
+      "window.commandCenter": false,
+      "workbench.colorTheme": "PHI47 Dark",
+      "editor.fontFamily": "'IBM Plex Mono', Consolas, 'Courier New', monospace",
+      "terminal.integrated.fontFamily": "'IBM Plex Mono', Consolas, monospace",
+      "editor.fontSize": 13,
+      "terminal.integrated.fontSize": 12,
+      "workbench.iconTheme": "vs-seti"
     },
+    "chatContext": [
+      {
+        "id": "vscodium-agent.files",
+        "icon": "$(folder-opened)",
+        "displayName": "Dateien vom Computer"
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {
@@ -295,6 +318,11 @@
         "category": "Agent"
       },
       {
+        "command": "vscodiumAgent.attachFilesFromComputer",
+        "title": "Dateien vom Computer zum Chat hinzufügen",
+        "category": "Agent"
+      },
+      {
         "command": "vscodiumAgent.inlineEdit",
         "title": "Inline-Edit (KI)",
         "category": "Agent"
@@ -359,12 +387,12 @@
         "vscodiumAgent.proxy.url": {
           "type": "string",
           "default": "https://agent-proxy-476281311476.europe-west1.run.app",
-          "markdownDescription": "Basis-URL des Agent-Proxys (Cloud Run). Der Proxy prüft die Anmeldung, hält Geheimnisse (Auth-Relay) und routet die Modelle serverseitig (siehe `docs/agent-proxy.md`)."
+          "markdownDescription": "Basis-URL des PHI47-Proxys (Cloud Run). Der Proxy prüft die Anmeldung, hält Geheimnisse (Auth-Relay) und routet die Modelle serverseitig (siehe `docs/agent-proxy.md`)."
         },
         "vscodiumAgent.model": {
           "type": "string",
           "default": "gemini-2.5-flash",
-          "markdownDescription": "Modellname, z. B. `gemini-3.5-flash`, `gemini-2.5-pro` oder `claude-opus-4-8`. Bequemer über den Modell-Picker in der Chat-Statusleiste – das Angebot (Gemini & Claude) bestimmt der Proxy, Standort-Routing inklusive."
+          "markdownDescription": "Modellname, z. B. `gemini-3.6-flash` oder `gemini-2.5-pro`. Bequemer über den Modell-Picker – das Angebot bestimmt der Proxy, Standort-Routing inklusive."
         },
         "vscodiumAgent.inlineEdit.model": {
           "type": "string",
@@ -432,6 +460,11 @@
           "type": "number",
           "default": 250,
           "description": "Maximale Anzahl Dateien/Ordner, die dem Modell als Projektbaum gezeigt werden."
+        },
+        "vscodiumAgent.activitySignal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Sichtbare Aktivität: Statusleisten-Anzeige und farbige Rahmen, solange ein Terminal-Kommando oder ein Agent-Lauf aktiv ist."
         }
       }
     }

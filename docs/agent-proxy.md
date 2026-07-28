@@ -265,6 +265,64 @@ Extension ab v0.9.0 kann sich ohne sie nicht anmelden bzw. keine Tokens erneuern
 Die Service-URL aus der Deploy-Ausgabe (Form `https://agent-proxy-…-ew.a.run.app`) wird
 später die Einstellung `vscodiumAgent.proxy.url` der Extension.
 
+### API-Schlüssel fremder Anbieter in den Tresor legen (GLM / Kimi)
+
+Für Modelle außerhalb von Vertex AI (Z.ai GLM, Moonshot Kimi) hält **der Proxy** einen
+einzigen Anbieter-Schlüssel — Nutzer brauchen keinen eigenen (Abo-Modell). Der Schlüssel
+liegt im **Secret Manager** („Tresor") und wird dem Dienst nur als Umgebungsvariable
+gereicht; er steht nie im Code, nie im Client, nie in Git.
+
+**Weg A — Klicken (Google-Cloud-Konsole):**
+
+1. [console.cloud.google.com](https://console.cloud.google.com) öffnen, oben rechts das
+   richtige Projekt wählen (`controlling-man`).
+2. Suchfeld oben: **„Secret Manager"** eingeben, Dienst öffnen. Beim ersten Mal erscheint
+   ein Knopf **„API aktivieren"** → klicken, kurz warten.
+3. **„+ Secret erstellen"**. Name: `zai-api-key` (für Kimi später: `moonshot-api-key`).
+   Feld **„Secret-Wert"**: den API-Schlüssel einfügen. Rest auf Standard lassen →
+   **„Secret erstellen"**.
+4. Im neuen Secret Reiter **„BERECHTIGUNGEN"** → **„Zugriff erlauben"**:
+   - Neue Hauptkonten: `agent-proxy@controlling-man.iam.gserviceaccount.com`
+   - Rolle: **Secret Manager Secret Accessor** (deutsche Oberfläche: **„Zugriffsperson für
+     Secret Manager-Secret"** — NICHT „Administrator", „Betrachter" oder „Editor")
+   - → Speichern.
+5. Fertig. Beim nächsten Deploy wird der Schlüssel angehängt (siehe unten).
+
+**Weg B — Copy-Paste (Cloud Shell, schneller):** In der Konsole oben rechts auf das
+Terminal-Symbol („Cloud Shell aktivieren"), dann:
+
+```bash
+gcloud config set project controlling-man
+gcloud services enable secretmanager.googleapis.com
+
+# Schlüssel anlegen (Wert zwischen die Anführungszeichen einsetzen)
+printf '%s' '<ZAI_API_KEY>' | gcloud secrets create zai-api-key --data-file=-
+
+# Dem Proxy Lesezugriff geben
+gcloud secrets add-iam-policy-binding zai-api-key \
+  --member "serviceAccount:agent-proxy@controlling-man.iam.gserviceaccount.com" \
+  --role "roles/secretmanager.secretAccessor"
+```
+
+**Schlüssel im Deploy anhängen** — die bestehende `--set-secrets`-Zeile aus Schritt 4
+einfach erweitern (Kimi analog mit `MOONSHOT_API_KEY=moonshot-api-key:latest`):
+
+```bash
+  --set-secrets GOOGLE_OAUTH_CLIENT_SECRET=oauth-client-secret:latest,FIREBASE_WEB_API_KEY=firebase-web-api-key:latest,ZAI_API_KEY=zai-api-key:latest \
+```
+
+**Schlüssel später wechseln** (z. B. nach einem Leak): neue Version anlegen, kein neuer
+Deploy nötig, da `:latest` gebunden ist — nur den Dienst einmal neu starten lassen:
+
+```bash
+printf '%s' '<NEUER_KEY>' | gcloud secrets versions add zai-api-key --data-file=-
+gcloud run services update agent-proxy --region europe-west1
+```
+
+> **Kostenkontrolle:** Anders als bei Vertex läuft dieser Verbrauch **außerhalb** der
+> Google-Cloud-Rechnung direkt beim Anbieter auf. Beim Anbieter ein Ausgabenlimit setzen;
+> die Monats-Quote im Proxy (`quotaFactor`) bleibt die zweite Bremse.
+
 ### Warum `--allow-unauthenticated`?
 
 Die IAM-Ebene von Cloud Run kann nur Google-Cloud-Identitäten prüfen — unsere Nutzer melden

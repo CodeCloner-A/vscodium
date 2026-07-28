@@ -42,6 +42,7 @@ const {
 const { AgentRun } = require('../lib/agentController');
 const { buildSystemPrompt, buildPlanPrompt } = require('../lib/prompts');
 const { registerNativeTools, runContexts, NativeRunHost } = require('./nativeTools');
+const { agentActivity } = require('./activitySignalController');
 
 const AGENT_PARTICIPANT_ID = 'vscodium-agent.agent';
 const MODEL_VENDOR = 'vscodium-agent';
@@ -90,6 +91,19 @@ function registerParticipant(context, deps) {
 	try {
 		participant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'agent.svg');
 	} catch (_e) { /* Icon ist optional */ }
+	try {
+		// Leerer Chat: Tonalität aus dem PHI47-Design („Chart the next move.“) – kurz,
+		// einladend, mit drei Startpunkten. Proposal `defaultChatParticipant`.
+		participant.additionalWelcomeMessage = new vscode.MarkdownString([
+			'**Wohin soll’s gehen?**',
+			'',
+			'Sag, was entstehen soll – ich plane die Route, schreibe den Code und führe ihn aus.',
+			'',
+			'- Bau mir eine Anmeldung mit Firebase Auth',
+			'- Warum schlägt der Build fehl?',
+			'- Verschaff dir einen Überblick über dieses Projekt'
+		].join('\n'));
+	} catch (_e) { /* Willkommenstext ist Komfort */ }
 	context.subscriptions.push(participant);
 	deps.logger.info(`Nativer Chat: Default-Participant registriert (${AGENT_PARTICIPANT_ID}, Modus agent; Plan-Modi via agents/*.agent.md).`);
 	return true;
@@ -129,6 +143,7 @@ async function handleAgentRequest(deps, request, chatContext, stream, token) {
 	const abort = new AbortController();
 	const cancellation = token.onCancellationRequested(() => abort.abort());
 	let exitRun = null;
+	agentActivity.started();
 	try {
 		if (pickedModelId(request) === SIGN_IN_MODEL_ID) {
 			streamSignInHint(stream);
@@ -218,7 +233,8 @@ async function handleAgentRequest(deps, request, chatContext, stream, token) {
 		});
 
 		const result = await run.run(request.prompt);
-		if (result.status === 'completed' && result.summary) {
+		// viaText-Summaries wurden schon während des Laufs gestreamt – nicht doppeln.
+		if (result.status === 'completed' && result.summary && !result.viaText) {
 			stream.markdown(`${result.summary}\n\n`);
 		}
 		if (!hasWorkspace) {
@@ -238,6 +254,7 @@ async function handleAgentRequest(deps, request, chatContext, stream, token) {
 		stream.markdown(`**Fehler:** ${err.message}${err.hint ? `\n\n_${err.hint}_` : ''}`);
 		return { errorDetails: { message: String(err.message || err) } };
 	} finally {
+		agentActivity.ended();
 		if (exitRun) { exitRun(); }
 		cancellation.dispose();
 	}

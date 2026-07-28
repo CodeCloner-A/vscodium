@@ -1,4 +1,21 @@
 {
+  "//": "PHI47-Branding (20.07.2026). Diese Datei wird in prepare_vscode.sh ZULETZT über die generierte product.json gemerged (jq '.[0] * .[1]') und überschreibt damit die VSCodium-Namen – kein Patch nötig. Die win32*AppId-GUIDs bleiben vorerst die geerbten; für eigene Installer später neue GUIDs vergeben.",
+  "nameShort": "PHI47",
+  "nameLong": "PHI47 IDE",
+  "applicationName": "phi47",
+  "dataFolderName": ".phi47",
+  "serverApplicationName": "phi47-server",
+  "serverDataFolderName": ".phi47-server",
+  "urlProtocol": "phi47",
+  "linuxIconName": "phi47",
+  "darwinBundleIdentifier": "com.phi47.ide",
+  "win32AppUserModelId": "PHI47.PHI47",
+  "win32DirName": "PHI47",
+  "win32MutexName": "phi47",
+  "win32NameVersion": "PHI47",
+  "win32RegValueName": "PHI47",
+  "win32ShellNameShort": "PHI47",
+  "tunnelApplicationName": "phi47-tunnel",
   "extensionAllowedBadgeProviders": [
     "api.bintray.com",
     "api.travis-ci.com",
@@ -464,7 +481,8 @@
     ],
     "vscodium.vscodium-agent": [
       "defaultChatParticipant",
-      "chatParticipantAdditions"
+      "chatParticipantAdditions",
+      "chatContextProvider"
     ]
   },
   "extensionKind": {

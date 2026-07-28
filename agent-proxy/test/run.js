@@ -92,9 +92,16 @@ async function testVerifier() {
 async function testCatalogAndVertexUrl() {
 	assert.ok(MODELS.length >= 4);
 	assert.strictEqual(findModel('gemini-3.5-flash').location, 'eu', '3.5-flash läuft über die eu-Multiregion');
+	assert.strictEqual(findModel('gemini-3.6-flash').location, 'global', '3.6-flash gibt es nur global (Stand 20.07.2026)');
+	assert.strictEqual(findModel('gemini-3.5-flash-lite').location, 'eu', '3.5-flash-lite läuft über die eu-Multiregion');
 	assert.strictEqual(findModel('gemini-2.5-pro').location, 'europe-west1');
 	assert.strictEqual(findModel('so-ein-modell-gibts-nicht'), null);
 	assert.ok(publicCatalog().every(m => m.id && m.label && m.location));
+	// hidden (Claude bis zur Model-Garden-Freischaltung): nicht im Picker-Angebot,
+	// aber weiterhin auflösbar (Übersetzungsschicht bleibt getestet, Vertex gated selbst).
+	assert.ok(publicCatalog().every(m => !m.id.startsWith('claude-')), 'hidden-Modelle dürfen nicht im publicCatalog stehen');
+	assert.ok(findModel('claude-sonnet-5') && findModel('claude-sonnet-5').hidden === true);
+	assert.ok(publicCatalog().some(m => m.id === 'gemini-3.6-flash'));
 
 	assert.strictEqual(hostFor('global'), 'aiplatform.googleapis.com');
 	assert.strictEqual(hostFor('europe-west2'), 'europe-west2-aiplatform.googleapis.com');
@@ -1293,6 +1300,164 @@ async function testAuthGlobalIsolation() {
 	}
 }
 
+async function testOpenAiCompatTranslator() {
+	const {
+		toOpenAiRequest, toGeminiResponse, createSseTranslator, toJsonSchema
+	} = require('../lib/openaiCompat');
+
+	// Request: System-Message, Rollen, Werkzeuge (Schema-Typen kleingeschrieben), Optionen.
+	const req = toOpenAiRequest({
+		systemInstruction: { parts: [{ text: 'Sei knapp.' }] },
+		contents: [
+			{ role: 'user', parts: [{ text: 'Lies a.js' }] },
+			{ role: 'model', parts: [{ functionCall: { name: 'read_file', args: { path: 'a.js' } } }] },
+			{ role: 'user', parts: [{ functionResponse: { name: 'read_file', response: { content: 'x' } } }] }
+		],
+		tools: [{ functionDeclarations: [{ name: 'read_file', description: 'liest', parameters: { type: 'OBJECT', properties: { path: { type: 'STRING' }, lines: { type: 'ARRAY', items: { type: 'INTEGER' } } }, required: ['path'] } }] }],
+		toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+		generationConfig: { temperature: 0.2, maxOutputTokens: 1000 }
+	}, { model: 'glm-5.2', stream: true });
+
+	assert.strictEqual(req.model, 'glm-5.2');
+	assert.deepStrictEqual(req.messages[0], { role: 'system', content: 'Sei knapp.' });
+	assert.deepStrictEqual(req.messages[1], { role: 'user', content: 'Lies a.js' });
+	assert.strictEqual(req.messages[2].role, 'assistant');
+	assert.strictEqual(req.messages[2].tool_calls[0].function.name, 'read_file');
+	assert.strictEqual(req.messages[2].tool_calls[0].function.arguments, '{"path":"a.js"}');
+	// Ergebnis-Nachricht referenziert exakt die ID des Aufrufs (sonst weist der Anbieter ab).
+	assert.strictEqual(req.messages[3].role, 'tool');
+	assert.strictEqual(req.messages[3].tool_call_id, req.messages[2].tool_calls[0].id);
+	assert.strictEqual(req.messages[3].content, '{"content":"x"}');
+	assert.strictEqual(req.tools[0].function.parameters.type, 'object');
+	assert.strictEqual(req.tools[0].function.parameters.properties.path.type, 'string');
+	assert.strictEqual(req.tools[0].function.parameters.properties.lines.items.type, 'integer');
+	assert.deepStrictEqual(req.tools[0].function.parameters.required, ['path']);
+	assert.strictEqual(req.tool_choice, 'auto');
+	assert.strictEqual(req.temperature, 0.2);
+	assert.strictEqual(req.max_tokens, 1000);
+	assert.strictEqual(req.stream, true);
+	assert.deepStrictEqual(req.stream_options, { include_usage: true }, 'ohne include_usage zählt das Metering Streams nicht');
+
+	// Ohne Werkzeuge kein tools-Feld; leere contents werden abgewiesen (400 statt Upstream-Weg).
+	assert.strictEqual(toOpenAiRequest({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] }, { model: 'glm-5.2' }).tools, undefined);
+	assert.throws(() => toOpenAiRequest({ contents: [] }, { model: 'glm-5.2' }), (e) => e.status === 400);
+	assert.deepStrictEqual(toJsonSchema({ type: 'OBJECT' }), { type: 'object', properties: {} });
+
+	// Antwort: Text + Tool-Calls + Usage → Gemini-Form.
+	const gem = toGeminiResponse({
+		choices: [{ message: { content: 'Fertig.', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write_file', arguments: '{"path":"b.js"}' } }] }, finish_reason: 'tool_calls' }],
+		usage: { prompt_tokens: 40, completion_tokens: 8, total_tokens: 48 }
+	});
+	assert.strictEqual(gem.candidates[0].content.parts[0].text, 'Fertig.');
+	assert.deepStrictEqual(gem.candidates[0].content.parts[1], { functionCall: { name: 'write_file', args: { path: 'b.js' } } });
+	assert.strictEqual(gem.candidates[0].finishReason, 'STOP');
+	assert.deepStrictEqual(gem.usageMetadata, { promptTokenCount: 40, candidatesTokenCount: 8, totalTokenCount: 48 });
+	// Kaputte Argumente retten statt werfen.
+	const broken = toGeminiResponse({ choices: [{ message: { tool_calls: [{ function: { name: 't', arguments: '{kaputt' } }] }, finish_reason: 'stop' }] });
+	assert.strictEqual(broken.candidates[0].content.parts[0].functionCall.args._raw, '{kaputt');
+
+	// SSE: zerteilte Chunks, Tool-Call-Fragmente sammeln, Usage am Ende.
+	const t = createSseTranslator();
+	let out = '';
+	const wire = [
+		'data: {"choices":[{"delta":{"content":"Hal"}}]}\n\n',
+		'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+		'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_file","arguments":"{\\"pa"}}]}}]}\n\n',
+		'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\\":\\"a.js\\"}"}}]}}]}\n\n',
+		'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}\n\n',
+		'data: [DONE]\n\n'
+	].join('');
+	// bewusst mitten in einem Event zerschneiden
+	out += t.push(Buffer.from(wire.slice(0, 90), 'utf8'));
+	out += t.push(Buffer.from(wire.slice(90), 'utf8'));
+	out += t.end();
+	const events = out.split('\n\n').filter(Boolean).map(l => JSON.parse(l.replace(/^data: /, '')));
+	assert.strictEqual(events.map(e => e.candidates[0].content.parts.map(p => p.text || '').join('')).join(''), 'Hallo');
+	const withCall = events.find(e => e.candidates[0].content.parts.some(p => p.functionCall));
+	assert.deepStrictEqual(withCall.candidates[0].content.parts.find(p => p.functionCall).functionCall, { name: 'read_file', args: { path: 'a.js' } });
+	const withUsage = events.find(e => e.usageMetadata);
+	assert.deepStrictEqual(withUsage.usageMetadata, { promptTokenCount: 12, candidatesTokenCount: 3, totalTokenCount: 15 });
+	assert.ok(t.sawUsage);
+
+	console.log('✔ OpenAI-kompatible Übersetzung: Request/Tools/Schema, Antwort, SSE (zerteilt, Tool-Calls, Usage)');
+}
+
+async function testGlmHttp() {
+	const { createOpenAiClient } = require('../lib/openaiCompat');
+	const { publicCatalog } = require('../lib/catalog');
+
+	// Katalog-Sichtbarkeit: ohne konfigurierten Anbieter kein toter Picker-Eintrag.
+	assert.ok(!publicCatalog().some(m => m.id === 'glm-5.2'), 'ohne Schlüssel darf glm-5.2 nicht im Angebot stehen');
+	assert.ok(publicCatalog(['zai']).some(m => m.id === 'glm-5.2'));
+
+	const upstreamCalls = [];
+	const zai = createOpenAiClient({
+		baseUrl: 'https://api.z.ai/api/paas/v4',
+		apiKey: 'test-key',
+		fetchImpl: async (url, init) => {
+			upstreamCalls.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+			return {
+				ok: true, status: 200,
+				text: async () => JSON.stringify({
+					choices: [{ message: { content: 'Moin.' }, finish_reason: 'stop' }],
+					usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 }
+				})
+			};
+		}
+	});
+	const recorded = [];
+	const meter = {
+		check: async () => ({ allowed: true }),
+		record: async (uid, usage, quotaFactor) => { recorded.push({ uid, usage, quotaFactor }); },
+		snapshot: async () => ({})
+	};
+	const server = createServer({
+		projectId: PROJECT, verify: makeVerifier(), meter,
+		providerClients: { zai }, rateLimitRpm: 100, log: () => { }
+	});
+	await new Promise((resolve) => server.listen(0, resolve));
+	const base = `http://127.0.0.1:${server.address().port}`;
+	const auth = { 'Authorization': `Bearer ${signToken({})}` };
+	try {
+		const res = await fetch(`${base}/v1/models/glm-5.2:generateContent`, {
+			method: 'POST', headers: auth,
+			body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Hallo' }] }] })
+		});
+		assert.strictEqual(res.status, 200);
+		const json = await res.json();
+		assert.strictEqual(json.candidates[0].content.parts[0].text, 'Moin.');
+		assert.strictEqual(upstreamCalls[0].url, 'https://api.z.ai/api/paas/v4/chat/completions');
+		assert.strictEqual(upstreamCalls[0].headers.Authorization, 'Bearer test-key');
+		assert.strictEqual(upstreamCalls[0].body.model, 'glm-5.2');
+		assert.deepStrictEqual(recorded[0], {
+			uid: 'user-123',
+			usage: { promptTokens: 20, candidateTokens: 5, totalTokens: 25 },
+			quotaFactor: { input: 3, output: 2 }
+		}, 'Metering zählt auch Fremd-Anbieter gewichtet');
+
+		// Angebot enthält glm-5.2, weil der Anbieter konfiguriert ist.
+		const models = await (await fetch(`${base}/v1/models`, { headers: auth })).json();
+		assert.ok(models.models.some(m => m.id === 'glm-5.2'));
+
+		// Ohne konfigurierten Anbieter: sauberes 503 statt Upstream-Fehler.
+		const bare = createServer({ projectId: PROJECT, verify: makeVerifier(), meter: null, providerClients: {}, rateLimitRpm: 100, log: () => { } });
+		await new Promise((resolve) => bare.listen(0, resolve));
+		const bareBase = `http://127.0.0.1:${bare.address().port}`;
+		try {
+			const res503 = await fetch(`${bareBase}/v1/models/glm-5.2:generateContent`, {
+				method: 'POST', headers: auth,
+				body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'x' }] }] })
+			});
+			assert.strictEqual(res503.status, 503);
+		} finally {
+			await new Promise((resolve) => bare.close(resolve));
+		}
+	} finally {
+		await new Promise((resolve) => server.close(resolve));
+	}
+	console.log('✔ GLM über Z.ai: Routing, Bearer-Schlüssel, Gemini-Antwort, gewichtetes Metering, 503 ohne Schlüssel');
+}
+
 async function main() {
 	await testVerifier();
 	await testCatalogAndVertexUrl();
@@ -1301,6 +1466,8 @@ async function main() {
 	await testMeteringHttp();
 	await testAnthropicTranslator();
 	await testClaudeHttp();
+	await testOpenAiCompatTranslator();
+	await testGlmHttp();
 	await testSessionStore();
 	await testSessionsHttp();
 	await testHttpServer();

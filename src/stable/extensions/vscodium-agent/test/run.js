@@ -1227,13 +1227,107 @@ async function testNativeAgentMode() {
 	// der Lauf ist rein konversationell; die Einsteiger-Führung steht in den Notes.
 	const bareClient = scriptedClient([[{ text: 'Gern – öffne zuerst über „Datei → Ordner öffnen…“ einen Ordner.' }]]);
 	const bareRun = new AgentRun({ client: bareClient, host: {}, ui: collectorUi(), systemPrompt: 't', toolDeclarations: [], retryDelayMs: 0 });
-	assert.strictEqual((await bareRun.run('Bau mir eine App.')).status, 'completed');
+	const bareOutcome2 = await bareRun.run('Bau mir eine App.');
+	assert.strictEqual(bareOutcome2.status, 'completed');
+	// Konversationelles Ende: Summary wurde schon gestreamt → viaText verhindert Doppel-Ausgabe.
+	assert.strictEqual(bareOutcome2.viaText, true);
+	assert.strictEqual(outcome.viaText, undefined, 'task_complete-Summary darf gerendert werden');
 	assert.strictEqual(bareClient.requests[0].tools, undefined);
 	assert.strictEqual(bareClient.requests[0].toolConfig, undefined);
 	assert.ok(NO_WORKSPACE_NOTES.includes('Neuen Projektordner anlegen') && NO_WORKSPACE_NOTES.includes('Never call tools'));
 	assert.ok(manifest.contributes.commands.some(c => c.command === 'vscodiumAgent.createWorkspace'), 'createWorkspace-Kommando fehlt im Manifest');
 
 	console.log('✔ Nativer Agent-Modus: Plan-Toolsets, Marker + .agent.md-Sync, Plan-Prompts, Freigabe-Metadaten, Manifest-Sync, Loop mit injizierten Tools, Netz-Retry');
+}
+
+async function testActivitySignal() {
+	const { ActivitySignal, applySignalColors, stripSignalColors, statusText, SIGNAL_COLORS } = require('../lib/activitySignal');
+
+	// Zähler: parallele Quellen, kein Unterlauf.
+	const s = new ActivitySignal();
+	assert.deepStrictEqual(s.state(), { terminal: false, agent: false });
+	s.terminalStarted(); s.terminalStarted(); s.agentStarted();
+	assert.deepStrictEqual(s.state(), { terminal: true, agent: true });
+	s.terminalEnded();
+	assert.deepStrictEqual(s.state(), { terminal: true, agent: true });
+	s.terminalEnded(); s.terminalEnded(); // Unterlauf abgefangen
+	assert.deepStrictEqual(s.state(), { terminal: false, agent: true });
+	s.agentEnded();
+	assert.deepStrictEqual(s.state(), { terminal: false, agent: false });
+
+	// Farb-Merge: Nutzerwerte bleiben unangetastet, fremdbelegte Schlüssel werden respektiert.
+	const user = { 'editor.background': '#111111', 'terminal.border': '#123456' };
+	const applied = applySignalColors(user, { terminal: true, agent: true });
+	assert.strictEqual(applied.colors['editor.background'], '#111111');
+	assert.strictEqual(applied.colors['terminal.border'], '#123456');
+	assert.strictEqual(applied.colors['panel.border'], SIGNAL_COLORS.terminal['panel.border']);
+	assert.strictEqual(applied.colors['editorGroup.border'], SIGNAL_COLORS.agent['editorGroup.border']);
+	assert.ok(applied.changed);
+
+	// Strip entfernt NUR unsere Signalwerte; Aus-Zustand stellt exakt den Nutzerstand her.
+	assert.deepStrictEqual(stripSignalColors(applied.colors), user);
+	assert.strictEqual(applySignalColors(applied.colors, { terminal: true, agent: true }).changed, false);
+	assert.deepStrictEqual(applySignalColors(applied.colors, { terminal: false, agent: false }).colors, user);
+
+	// Statusleiste: Agent-Signal gewinnt, sonst Terminal, sonst nichts.
+	assert.ok(statusText({ agent: true, terminal: true }).includes('Agent'));
+	assert.ok(statusText({ agent: false, terminal: true }).includes('Kommando'));
+	assert.strictEqual(statusText({ agent: false, terminal: false }), null);
+
+	// Manifest: Anhang-Eintrag, Proposal, Kommando, Setting.
+	assert.deepStrictEqual(manifest.contributes.chatContext, [{ id: 'vscodium-agent.files', icon: '$(folder-opened)', displayName: 'Dateien vom Computer' }]);
+	assert.ok(manifest.enabledApiProposals.includes('chatContextProvider'), 'chatContextProvider fehlt in enabledApiProposals');
+	assert.ok(manifest.contributes.commands.some(c => c.command === 'vscodiumAgent.attachFilesFromComputer'));
+	assert.ok(manifest.contributes.configuration.properties['vscodiumAgent.activitySignal']);
+
+	console.log('✔ Aktivitäts-Signale: Zähler, Farb-Merge/Strip (Nutzerfarben geschützt), Statusleiste, Manifest');
+}
+
+async function testBranding() {
+	const { SIGNAL_COLORS } = require('../lib/activitySignal');
+	const GOLD = '#E0B84A';
+
+	// Theme ist beigesteuert, als Standard gesetzt und lädt sauber.
+	const themes = manifest.contributes.themes;
+	assert.deepStrictEqual(themes, [{ label: 'PHI47 Dark', uiTheme: 'vs-dark', path: './themes/phi47-dark.json' }]);
+	assert.strictEqual(manifest.contributes.configurationDefaults['workbench.colorTheme'], 'PHI47 Dark');
+	const themePath = path.join(__dirname, '..', themes[0].path);
+	const theme = JSON.parse(fs.readFileSync(themePath, 'utf8'));
+	assert.strictEqual(theme.name, 'PHI47 Dark');
+	assert.strictEqual(theme.type, 'dark');
+	// Design-Tokens: Gold als Akzent, Flächen und Rahmen wie im Entwurf.
+	assert.strictEqual(theme.colors['activityBar.foreground'], GOLD);
+	assert.strictEqual(theme.colors['tab.activeBorderTop'], GOLD);
+	assert.strictEqual(theme.colors['button.background'], GOLD);
+	assert.strictEqual(theme.colors['editor.background'], '#14161B');
+	assert.strictEqual(theme.colors['sideBar.background'], '#0F1115');
+	assert.strictEqual(theme.colors['statusBar.background'], '#0F1115');
+	assert.strictEqual(theme.colors['terminal.ansiGreen'], '#8FBF6F');
+	assert.strictEqual(theme.colors['terminal.ansiBlue'], '#7FB2E5');
+	assert.ok(theme.tokenColors.length >= 10 && theme.semanticTokenColors, 'Syntaxfarben fehlen');
+	// Jede Farbe ein gültiger Hex-Wert (Tippfehler killen sonst still das ganze Theme).
+	for (const [key, value] of Object.entries(theme.colors)) {
+		assert.ok(/^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/.test(value), `Ungültiger Farbwert: ${key} = ${value}`);
+	}
+
+	// Aktivitäts-Signale nutzen dieselbe Palette (Gold = Kommando, Blau = Agent).
+	assert.ok(SIGNAL_COLORS.terminal['terminal.border'].startsWith(GOLD));
+	assert.ok(SIGNAL_COLORS.agent['editorGroup.border'].startsWith('#7FB2E5'));
+
+	// Produktname überall, wo Nutzer ihn sehen.
+	assert.strictEqual(manifest.displayName, 'PHI47 Agent');
+	assert.ok(manifest.contributes.chatParticipants.every(p => p.fullName === 'PHI47'));
+	assert.ok(manifest.contributes.chatParticipants.some(p => p.sampleRequest));
+
+	// φ-Logo (Marke) statt des alten Roboter-Icons.
+	const logo = fs.readFileSync(path.join(__dirname, '..', 'media', 'agent.svg'), 'utf8');
+	assert.ok(logo.includes('ellipse') && logo.includes(GOLD), 'φ-Marke fehlt im Logo');
+
+	// Schriften aus dem Design – mit Rückfallkette, falls IBM Plex nicht installiert ist.
+	const fonts = manifest.contributes.configurationDefaults['editor.fontFamily'];
+	assert.ok(fonts.includes('IBM Plex Mono') && fonts.includes('monospace'), 'Font-Fallback fehlt');
+
+	console.log('✔ PHI47-Branding: Theme (Tokens + Farbwerte), Signalpalette, Produktname, φ-Logo, Schriften');
 }
 
 async function main() {
@@ -1255,6 +1349,8 @@ async function main() {
 	await testTerminalHelpers();
 	await testNativeChat();
 	await testNativeAgentMode();
+	await testActivitySignal();
+	await testBranding();
 	console.log('\nAlle Tests bestanden.');
 }
 

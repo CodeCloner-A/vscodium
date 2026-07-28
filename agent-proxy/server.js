@@ -35,7 +35,8 @@ const { createVertexClient } = require('./lib/vertex');
 const { createMeter } = require('./lib/metering');
 const { createAuthRelay } = require('./lib/authRelay');
 const { createSessionStore } = require('./lib/sessions');
-const { findModel, publicCatalog } = require('./lib/catalog');
+const { findModel, publicCatalog, PROVIDERS } = require('./lib/catalog');
+const { createOpenAiClient } = require('./lib/openaiCompat');
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 64 * 1024;
@@ -169,6 +170,23 @@ function createServer(options) {
 		project: options.vertexProject || projectId,
 		maxTokensDefault: options.anthropicMaxTokens
 	});
+	// Fremd-Anbieter (OpenAI-kompatibel, z. B. Z.ai GLM): nur aktiv, wenn der Schlüssel
+	// als Env-Variable ankommt (Secret Manager → Cloud Run). Ohne Schlüssel bleiben die
+	// Modelle aus dem Katalog-Angebot verschwunden – keine toten Picker-Einträge.
+	const providerClients = options.providerClients || (() => {
+		const clients = {};
+		for (const [name, cfg] of Object.entries(PROVIDERS)) {
+			const apiKey = process.env[cfg.keyEnv];
+			if (!apiKey) { continue; }
+			clients[name] = createOpenAiClient({
+				baseUrl: cfg.baseUrl,
+				apiKey,
+				maxTokensDefault: options.anthropicMaxTokens
+			});
+			log({ severity: 'INFO', message: `Anbieter aktiv: ${cfg.label} (${name})` });
+		}
+		return clients;
+	})();
 	// Firestore-Metering (meter: null schaltet es bewusst ab, z. B. in Tests).
 	// Die Zähler leben im Firebase-Projekt – dort schaut auch die Firebase Console drauf.
 	const meter = options.meter !== undefined ? options.meter : createMeter({
@@ -260,7 +278,7 @@ function createServer(options) {
 			}
 
 			if (req.method === 'GET' && url.pathname === '/v1/models') {
-				return send(res, 200, { models: publicCatalog() });
+				return send(res, 200, { models: publicCatalog(Object.keys(providerClients)) });
 			}
 
 			if (req.method === 'GET' && url.pathname === '/v1/usage') {
@@ -333,6 +351,12 @@ function createServer(options) {
 			if (!model) {
 				return send(res, 404, { error: `Modell nicht im Angebot: ${match[1]}` });
 			}
+			// Fremd-Anbieter ohne konfigurierten Schlüssel: sauber 503 statt Upstream-Fehler.
+			const client = model.provider ? providerClients[model.provider] : vertex;
+			if (!client) {
+				log({ severity: 'WARNING', uid: user.uid, model: model.id, message: `Anbieter ${model.provider} nicht konfiguriert` });
+				return send(res, 503, { error: 'Dieses Modell ist derzeit nicht verfügbar. Bitte ein anderes wählen.' });
+			}
 			const task = match[2];
 			const streaming = task === 'streamGenerateContent';
 
@@ -358,7 +382,7 @@ function createServer(options) {
 
 			let upstream;
 			try {
-				upstream = await vertex.call(model, task, body, { stream: streaming, signal: abort.signal });
+				upstream = await client.call(model, task, body, { stream: streaming, signal: abort.signal });
 
 				if (!streaming || !upstream.ok || !upstream.body) {
 					// JSON-Antwort (oder Upstream-Fehler) unverändert durchreichen; der
