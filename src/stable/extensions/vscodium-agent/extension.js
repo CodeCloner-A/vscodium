@@ -91,10 +91,10 @@ function activate(context) {
 		}),
 
 		vscode.commands.registerCommand('vscodiumAgent.signIn', async () => {
-			const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
-			const proxyUrl = String(cfg.get('proxy.url', '')).replace(/\/+$/, '');
+			// Eine Quelle für alle: der Kern-Dienst kennt den Produkt-Standard.
+			const proxyUrl = service.config().proxyUrl;
 			if (!proxyUrl) {
-				void vscode.window.showErrorMessage('Keine Proxy-URL konfiguriert (vscodiumAgent.proxy.url).');
+				void vscode.window.showErrorMessage('Keine Adresse des PHI47-Dienstes konfiguriert (vscodiumAgent.proxy.url).');
 				return;
 			}
 			if (!GOOGLE_OAUTH_CLIENT_ID) {
@@ -143,10 +143,10 @@ function activate(context) {
 		}),
 
 		vscode.commands.registerCommand('vscodiumAgent.testProxy', async () => {
-			const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
-			const proxyUrl = String(cfg.get('proxy.url', '')).replace(/\/+$/, '');
+			// Eine Quelle für alle: der Kern-Dienst kennt den Produkt-Standard.
+			const proxyUrl = service.config().proxyUrl;
 			if (!proxyUrl) {
-				void vscode.window.showErrorMessage('Keine Proxy-URL konfiguriert (vscodiumAgent.proxy.url).');
+				void vscode.window.showErrorMessage('Keine Adresse des PHI47-Dienstes konfiguriert (vscodiumAgent.proxy.url).');
 				return;
 			}
 			await vscode.window.withProgress(
@@ -168,10 +168,10 @@ function activate(context) {
 		}),
 
 		vscode.commands.registerCommand('vscodiumAgent.showUsage', async () => {
-			const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
-			const proxyUrl = String(cfg.get('proxy.url', '')).replace(/\/+$/, '');
+			// Eine Quelle für alle: der Kern-Dienst kennt den Produkt-Standard.
+			const proxyUrl = service.config().proxyUrl;
 			if (!proxyUrl) {
-				void vscode.window.showErrorMessage('Keine Proxy-URL konfiguriert (vscodiumAgent.proxy.url).');
+				void vscode.window.showErrorMessage('Keine Adresse des PHI47-Dienstes konfiguriert (vscodiumAgent.proxy.url).');
 				return;
 			}
 			if (!await auth.isSignedIn()) {

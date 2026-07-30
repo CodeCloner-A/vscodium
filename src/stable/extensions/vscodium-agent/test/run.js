@@ -1414,11 +1414,24 @@ async function testOnboardingAndSettings() {
 		const text = props[key].description || props[key].markdownDescription || '';
 		assert.ok(/settings\.json/.test(text), `Versteckte Einstellung ohne Hinweis auf settings.json: ${key}`);
 	}
-	// Verborgene Einstellungen bleiben lesbar, weil der Code überall Defaults mitgibt.
+	// WICHTIG (Fehler vom 28.07.2026): `included: false` nimmt eine Einstellung aus der
+	// Registry – damit greift auch ihr package.json-Default NICHT mehr. Jeder verborgene
+	// Wert muss deshalb einen echten Rückfallwert im Code haben, sonst steht das Produkt
+	// ohne Konfiguration da (damals: leere Dienst-Adresse → keine Modelle, keine Anmeldung).
 	const serviceSource = fs.readFileSync(path.join(root, 'ui', 'agentService.js'), 'utf8');
 	for (const key of ['maxIterations', 'commandTimeoutSec', 'context.maxTreeEntries', 'terminal.mode', 'proxy.url', 'inlineEdit.model']) {
-		assert.ok(new RegExp(`get\\('${key.replace('.', '\\.')}',`).test(serviceSource), `Default fehlt im Code für ${key}`);
+		const call = new RegExp(`get\\('${key.replace('.', '\\.')}',\\s*([^)]+)\\)`).exec(serviceSource);
+		assert.ok(call, `Default fehlt im Code für ${key}`);
+		const fallback = call[1].trim();
+		assert.ok(fallback && fallback !== "''" && fallback !== '""', `Leerer Rückfallwert für verborgene Einstellung ${key}`);
 	}
+	// Die Dienst-Adresse steht im Produkt (saasConfig) und deckt sich mit der package.json.
+	const { DEFAULT_PROXY_URL } = require('../lib/saasConfig');
+	assert.ok(/^https:\/\/\S+$/.test(DEFAULT_PROXY_URL), 'Dienst-Adresse fehlt oder ist keine URL');
+	assert.strictEqual(props['vscodiumAgent.proxy.url'].default, DEFAULT_PROXY_URL, 'package.json und Code-Default müssen übereinstimmen');
+	// Kommandos dürfen die Adresse nicht mehr selbst aus den Einstellungen lesen.
+	assert.ok(!/get\('proxy\.url'/.test(extensionSource), 'extension.js liest die Dienst-Adresse an der Konfiguration vorbei');
+	assert.ok(/service\.config\(\)\.proxyUrl/.test(extensionSource), 'Kommandos müssen den Kern-Dienst fragen');
 
 	// Anmelde-Dialog im Chat: Wortlaut zentral, beide Knöpfe wie gefordert.
 	const { SIGN_IN_PROMPT } = require('../lib/nativeChat');
@@ -1427,6 +1440,10 @@ async function testOnboardingAndSettings() {
 	assert.ok(SIGN_IN_PROMPT.message && SIGN_IN_PROMPT.detail);
 	const chatSource = fs.readFileSync(path.join(root, 'ui', 'nativeChatController.js'), 'utf8');
 	assert.ok(/showInformationMessage\(\s*SIGN_IN_PROMPT\.message,\s*\{ modal: true/.test(chatSource), 'Anmeldung muss als echter Dialog erscheinen');
+	// Der Anmelde-Hinweis gehört in den Chat, NICHT als Platzhalter in den Modell-Picker
+	// (Befund 28.07.2026) – und die Modell-Liste muss immer gefüllt sein.
+	assert.ok(!/id: SIGN_IN_MODEL_ID|'anmeldung-erforderlich'/.test(chatSource), 'Platzhalter-Modell gehört nicht in den Picker');
+	assert.ok(/return pickerModels\(\)\.map\(toEntry\)/.test(chatSource), 'ohne Dienst-Katalog muss die lokale Liste einspringen');
 	assert.ok(/ensureSignedIn\(deps, stream\)/.test(chatSource), 'Chat-Anfragen müssen die Anmeldung sicherstellen');
 	assert.ok(/signInDialogSkipped = true/.test(chatSource), '„Überspringen" darf nicht bei jeder Nachricht erneut fragen');
 

@@ -46,13 +46,15 @@ const {
 const { AgentRun } = require('../lib/agentController');
 const { buildSystemPrompt, buildPlanPrompt } = require('../lib/prompts');
 const { MEMORY_PATH, COMPAT_PATHS, MEMORY_RULES, buildMemorySection } = require('../lib/projectMemory');
+const { pickerModels } = require('../lib/modelCatalog');
 const { registerNativeTools, runContexts, NativeRunHost } = require('./nativeTools');
 const { agentActivity } = require('./activitySignalController');
 
 const AGENT_PARTICIPANT_ID = 'vscodium-agent.agent';
 const MODEL_VENDOR = 'vscodium-agent';
 /** Platzhalter-Modell, das ohne Anmeldung im Picker steht. */
-const SIGN_IN_MODEL_ID = 'anmeldung-erforderlich';
+// (Bis v0.21.1 stand hier ein Platzhalter-Modell „Anmelden erforderlich“. Die Anmeldung
+// gehört in den Chat, nicht in den Modell-Picker – siehe ensureSignedIn.)
 /** Marker → Plan-Variante (bewusst explizit statt „alles durchreichen“). */
 const PLAN_VARIANTS = new Set(['plan', 'plan-extended']);
 
@@ -116,12 +118,11 @@ function registerParticipant(context, deps) {
 
 /**
  * Modell aus der nativen Picker-Auswahl, sofern sie von unserem Provider stammt.
- * Der Platzhalter „Anmelden erforderlich“ zählt nicht als Auswahl – nach der
- * Anmeldung soll das konfigurierte Modell greifen.
+ * Fremde Auswahl (oder gar keine) fällt auf das konfigurierte Modell zurück.
  */
 function pickedModelId(request) {
 	if (!request.model || request.model.vendor !== MODEL_VENDOR) { return undefined; }
-	return request.model.id === SIGN_IN_MODEL_ID ? undefined : request.model.id;
+	return request.model.id;
 }
 
 /** Anmelde-Hinweis mit Button streamen (Rückfalltext, wenn der Dialog übersprungen wurde). */
@@ -439,60 +440,46 @@ function registerModelProvider(context, provider, logger) {
 	try {
 		const disposable = vscode.lm.registerLanguageModelChatProvider(MODEL_VENDOR, {
 			/**
-			 * Proxy-Katalog → Picker-Einträge. Ohne Anmeldung liefern wir einen
-			 * Platzhalter: Die UI verlangt zwingend ein Modell pro Request – mit
-			 * leerer Liste scheitern Anfragen VOR dem Participant mit „Language
-			 * model unavailable“ (Probefahrt-Befund). Über den Platzhalter landet
-			 * die Anfrage bei uns und führt freundlich zur Anmeldung.
+			 * Modelle für den Picker – IMMER sichtbar, auch ohne Anmeldung.
+			 *
+			 * Angemeldet gilt der Server-Katalog (maßgeblich, inkl. Fremd-Anbieter);
+			 * ohne Anmeldung oder bei unerreichbarem Dienst zeigt der lokale Katalog
+			 * dasselbe Angebot, damit die Auswahl nie leer dasteht. Die Anmeldung
+			 * verlangt der Chat selbst (Dialog beim ersten Senden) – ein Platzhalter
+			 * „Anmelden erforderlich“ im Modell-Picker war der falsche Ort dafür.
 			 */
 			async provideLanguageModelChatInformation(_options, _token) {
+				const toEntry = (m) => ({
+					id: m.id,
+					name: m.label || m.id,
+					family: MODEL_VENDOR,
+					version: '1.0',
+					// Der Katalog liefert (noch) keine Token-Limits – konservative Platzhalter;
+					// die tatsächliche Begrenzung erzwingt der Dienst.
+					maxInputTokens: 200000,
+					maxOutputTokens: 64000,
+					// toolCalling MUSS true sein: Agent-Modus (und Inline-Chat) filtern den
+					// Picker auf diese Fähigkeit (languageModels.ts suitableForAgentMode) –
+					// mit false bliebe die Liste leer.
+					capabilities: { toolCalling: true, imageInput: true },
+					detail: m.region ? `Region: ${m.region}` : undefined,
+					tooltip: 'PHI47-Dienst'
+				});
 				try {
-					const signedIn = provider.auth && await provider.auth.isSignedIn();
-					if (signedIn) {
+					if (provider.auth && await provider.auth.isSignedIn()) {
 						const models = await provider._proxyModels();
 						if (Array.isArray(models) && models.length > 0) {
-							return models.map((m) => ({
-								id: m.id,
-								name: m.label || m.id,
-								family: MODEL_VENDOR,
-								version: '1.0',
-								// Der Proxy-Katalog liefert (noch) keine Token-Limits – konservative
-								// Platzhalter; die tatsächliche Begrenzung erzwingt der Proxy.
-								maxInputTokens: 200000,
-								maxOutputTokens: 64000,
-								// toolCalling MUSS true sein: Agent-Modus (und Inline-Chat) filtern den
-								// Picker auf diese Fähigkeit (languageModels.ts suitableForAgentMode) –
-								// mit false ist die Modell-Liste leer und der Chat meldet „Language model
-								// unavailable“. Die Modelle KÖNNEN Tools (der Proxy übersetzt Function
-								// Calling nativ); die Durchleitung von options.tools in
-								// provideLanguageModelChatResponse für FREMDE Konsumenten ist ein
-								// späteres Arbeitspaket (unser eigener Agent-Loop nutzt diesen Pfad nicht).
-								capabilities: { toolCalling: true, imageInput: false },
-								detail: m.region ? `Region: ${m.region}` : undefined,
-								tooltip: 'VSCodium Agent-Proxy (Vertex AI)'
-							}));
+							return models.map(toEntry);
 						}
 					}
 				} catch (err) {
-					logger.warn('Nativer Chat: Modell-Katalog für den Picker nicht abrufbar.', err);
+					logger.warn('Nativer Chat: Modell-Katalog vom Dienst nicht abrufbar – lokale Liste.', err);
 				}
-				return [{
-					id: SIGN_IN_MODEL_ID,
-					name: 'Anmelden erforderlich',
-					family: MODEL_VENDOR,
-					version: '1.0',
-					maxInputTokens: 1000,
-					maxOutputTokens: 1000,
-					capabilities: { toolCalling: true, imageInput: false },
-					detail: 'Kommando „Agent: Mit Google anmelden“',
-					tooltip: 'Anmelden, um die Gemini- und Claude-Modelle des Agent-Proxys zu laden.'
-				}];
+				// Rückfall: kuratierte Liste aus dem Build (lib/modelCatalog.js).
+				return pickerModels().map(toEntry);
 			},
 
 			async provideLanguageModelChatResponse(model, messages, _options, progress, token) {
-				if (model.id === SIGN_IN_MODEL_ID) {
-					throw new Error('Nicht angemeldet – bitte das Kommando „Agent: Mit Google anmelden“ ausführen und erneut senden.');
-				}
 				const abort = new AbortController();
 				const cancellation = token.onCancellationRequested(() => abort.abort());
 				try {
@@ -526,6 +513,5 @@ function registerModelProvider(context, provider, logger) {
 module.exports = {
 	registerNativeChat,
 	AGENT_PARTICIPANT_ID,
-	MODEL_VENDOR,
-	SIGN_IN_MODEL_ID
+	MODEL_VENDOR
 };

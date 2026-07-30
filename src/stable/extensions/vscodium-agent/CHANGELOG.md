@@ -4,6 +4,18 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.21.2] – 2026-07-28
+
+### Behoben
+- **Modelle sind jetzt immer sichtbar.** Bisher füllte sich der Modell-Picker erst nach der ersten Antwort und blieb ohne Anmeldung leer; jetzt zeigt er sofort das Angebot — angemeldet den Katalog des Dienstes, sonst die im Build hinterlegte Liste.
+- **„Anmelden erforderlich" ist aus dem Modell-Picker verschwunden.** Der Hinweis gehört dorthin, wo die Unterhaltung stattfindet: Wer ohne Anmeldung schreibt, bekommt den Dialog („Mit Google anmelden" / „Überspringen") und im Chat den Hinweis mit Anmelde-Knopf — nicht ein Pseudo-Modell zum Auswählen.
+
+## [0.21.1] – 2026-07-28
+
+### Behoben
+- **Anmeldung und Modelle waren tot: „Keine Proxy-URL konfiguriert".** Ursache war das Verbergen der Experten-Einstellungen in v0.18.0: `included: false` nimmt eine Einstellung komplett aus der Registry — damit greift auch ihr Standardwert aus der `package.json` nicht mehr. Die Adresse des PHI47-Dienstes fiel dadurch auf einen leeren Wert zurück, und ohne Adresse gibt es weder Modell-Katalog noch Anmeldung. Die Adresse steht jetzt als Produkt-Konstante im Code (`lib/saasConfig.js`); die Einstellung überschreibt sie weiterhin, wenn jemand sie in der `settings.json` setzt. Alle Kommandos (Anmelden, Verbindungstest, Verbrauch) holen sie über den Kern-Dienst statt selbst aus der Konfiguration.
+- Neuer Testwächter: Verborgene Einstellungen müssen einen echten Rückfallwert im Code haben, und der Produkt-Standard muss mit der `package.json` übereinstimmen.
+
 ## [0.21.0] – 2026-07-28
 
 ### Behoben

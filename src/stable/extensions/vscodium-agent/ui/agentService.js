@@ -14,6 +14,7 @@
 
 const vscode = require('vscode');
 const { ProxyClient, ProxyError } = require('../lib/proxyClient');
+const { DEFAULT_PROXY_URL } = require('../lib/saasConfig');
 const { WorkspaceHost } = require('../lib/workspaceHost');
 
 /** Zeitpunkt der letzten Kontext-Erfassung des Agenten (für Aktivitäts-Deltas). */
@@ -41,7 +42,9 @@ class AgentService {
 	config() {
 		const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
 		return {
-			proxyUrl: String(cfg.get('proxy.url', '')).replace(/\/+$/, ''),
+			// Achtung: verborgene Einstellungen (included: false) liefern KEINE
+			// package.json-Defaults – der Rückfallwert muss aus dem Code kommen.
+			proxyUrl: String(cfg.get('proxy.url', DEFAULT_PROXY_URL) || DEFAULT_PROXY_URL).replace(/\/+$/, ''),
 			// Standard: EU-Route bevorzugt (Datenresidenz), fürs Inline-Edit die schnelle Lite-Variante.
 			model: cfg.get('model', 'gemini-3.5-flash'),
 			inlineEditModel: cfg.get('inlineEdit.model', 'gemini-3.5-flash-lite'),
