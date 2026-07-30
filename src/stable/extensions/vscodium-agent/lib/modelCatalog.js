@@ -24,9 +24,10 @@ const MODEL_CATALOG = [
 	{ id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash · stark & schnell', vertexLocations: ['global'] },
 	{ id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite · flink & günstig', vertexLocations: ['global'] },
 	{ id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro · Vorschau, komplexe Aufgaben', vertexLocations: ['global'] },
-	// Fremd-Anbieter (Z.ai) – Routing macht der Proxy; hier nur fürs Picker-Label,
-	// falls der Server-Katalog einmal nicht erreichbar ist.
-	{ id: 'glm-5.2', label: 'GLM 5.2 · Z.ai, 1 Mio. Kontext', vertexLocations: ['global'] }
+	// Fremd-Anbieter (Z.ai/Moonshot) – Routing macht der Proxy; hier nur fürs
+	// Picker-Label, falls der Server-Katalog einmal nicht erreichbar ist.
+	{ id: 'glm-5.2', label: 'GLM 5.2 · Z.ai, 1 Mio. Kontext', vertexLocations: ['global'] },
+	{ id: 'kimi-k3', label: 'Kimi K3 · Moonshot, 1 Mio. Kontext', vertexLocations: ['global'] }
 ];
 
 /**

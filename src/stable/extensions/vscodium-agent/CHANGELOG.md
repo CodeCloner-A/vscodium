@@ -4,6 +4,12 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.21.3] – 2026-07-28
+
+### Behoben
+- **Kimi K3 und GLM 5.2 stehen jetzt auch in der Rückfall-Liste des Pickers** — bisher fehlte Kimi dort, sodass es ohne erreichbaren Dienst-Katalog „verschwand".
+- **`/health` des Dienstes zeigt Version und Modell-Angebot (Proxy v0.9.1):** Ein Browser-Aufruf der Dienst-Adresse mit `/health` beantwortet ab sofort die Frage „welcher Stand läuft wirklich?" — statt Deploy-Fehler an Symptomen zu raten.
+
 ## [0.21.2] – 2026-07-28
 
 ### Behoben

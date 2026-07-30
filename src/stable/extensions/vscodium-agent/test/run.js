@@ -1545,6 +1545,9 @@ async function testTokenAccounting() {
 	assert.ok(!ids.some(id => id.startsWith('gemini-2.')), 'Gemini-2er gehören nicht mehr ins Angebot');
 	assert.ok(ids.includes('gemini-3.1-pro-preview'), '3.1 Pro Preview fehlt');
 	assert.ok(ids.includes('gemini-3.6-flash') && ids.includes('gemini-3.5-flash') && ids.includes('gemini-3.5-flash-lite'));
+	// Fremd-Anbieter gehören auch in die Rückfall-Liste – sonst „verschwinden“ sie,
+	// sobald der Dienst-Katalog nicht erreichbar ist (Befund 28.07.: Kimi fehlte).
+	assert.ok(ids.includes('glm-5.2') && ids.includes('kimi-k3'), 'GLM/Kimi fehlen im lokalen Fallback');
 	assert.ok(pickerModels().some(m => m.id === 'gemini-3.5-flash'));
 	// Standard-Modelle zeigen auf existierende Einträge.
 	const props = manifest.contributes.configuration.properties;

@@ -2,7 +2,7 @@
   "name": "vscodium-agent",
   "displayName": "PHI47 Agent",
   "description": "Der Agent von PHI47: Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review.",
-  "version": "0.21.2",
+  "version": "0.21.3",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {

@@ -38,6 +38,9 @@ const { createSessionStore } = require('./lib/sessions');
 const { findModel, publicCatalog, PROVIDERS } = require('./lib/catalog');
 const { createOpenAiClient } = require('./lib/openaiCompat');
 
+/** Version aus package.json – erscheint in /health (Deploy-Kontrolle). */
+const PROXY_VERSION = require('./package.json').version;
+
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 64 * 1024;
 // Sitzungs-PUT: Nutzdaten sind auf ~900 KiB gedeckelt (lib/sessions.js); hier nur der
@@ -238,7 +241,14 @@ function createServer(options) {
 			const url = new URL(req.url, 'http://localhost');
 
 			if (req.method === 'GET' && url.pathname === '/health') {
-				return send(res, 200, { status: 'ok' });
+				// Version + Angebotsgröße öffentlich: beides steht ohnehin im Repo bzw.
+				// im Picker. Macht „welcher Stand läuft WIRKLICH?“ zum Ein-Klick-Check
+				// (Browser auf /health), statt Deploy-Fehler an Symptomen zu raten.
+				return send(res, 200, {
+					status: 'ok',
+					version: PROXY_VERSION,
+					models: publicCatalog(Object.keys(providerClients)).map(m => m.id)
+				});
 			}
 
 			// Auth-Bootstrap: die einzigen Endpunkte ohne Bearer-Prüfung (das Token entsteht
