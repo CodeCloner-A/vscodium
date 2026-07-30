@@ -37,10 +37,15 @@ const {
 	parseToolResultText,
 	lmResultToText,
 	buildNativeModeNotes,
-	NO_WORKSPACE_NOTES
+	NO_WORKSPACE_NOTES,
+	SIGN_IN_PROMPT,
+	addUsage,
+	buildUsageLine,
+	imageAttachmentParts
 } = require('../lib/nativeChat');
 const { AgentRun } = require('../lib/agentController');
 const { buildSystemPrompt, buildPlanPrompt } = require('../lib/prompts');
+const { MEMORY_PATH, COMPAT_PATHS, MEMORY_RULES, buildMemorySection } = require('../lib/projectMemory');
 const { registerNativeTools, runContexts, NativeRunHost } = require('./nativeTools');
 const { agentActivity } = require('./activitySignalController');
 
@@ -53,7 +58,7 @@ const PLAN_VARIANTS = new Set(['plan', 'plan-extended']);
 
 /**
  * @param {import('vscode').ExtensionContext} context
- * @param {any} provider  ChatViewProvider (liefert buildClient/config/auth)
+ * @param {import('./agentService').AgentService} provider  Kern-Dienst (buildClient/config/auth/_proxyModels)
  * @param {any} activity  ActivityIndex oder null
  * @param {{ info: Function, warn: Function, error: Function }} logger
  * @returns {{ participants: number, tools: number, modelProvider: boolean }}
@@ -109,18 +114,85 @@ function registerParticipant(context, deps) {
 	return true;
 }
 
-/** Modell aus der nativen Picker-Auswahl, sofern sie von unserem Provider stammt. */
+/**
+ * Modell aus der nativen Picker-Auswahl, sofern sie von unserem Provider stammt.
+ * Der Platzhalter „Anmelden erforderlich“ zählt nicht als Auswahl – nach der
+ * Anmeldung soll das konfigurierte Modell greifen.
+ */
 function pickedModelId(request) {
-	return request.model && request.model.vendor === MODEL_VENDOR ? request.model.id : undefined;
+	if (!request.model || request.model.vendor !== MODEL_VENDOR) { return undefined; }
+	return request.model.id === SIGN_IN_MODEL_ID ? undefined : request.model.id;
 }
 
-/** Anmelde-Hinweis mit Button streamen (statt kryptischer Systemmeldungen). */
+/** Anmelde-Hinweis mit Button streamen (Rückfalltext, wenn der Dialog übersprungen wurde). */
 function streamSignInHint(stream) {
-	stream.markdown('**Nicht angemeldet.** Der Agent spricht über den Agent-Proxy mit Gemini & Claude – dafür braucht es dein Google-Konto.\n\n');
+	stream.markdown(`**${SIGN_IN_PROMPT.message}.** Ohne Anmeldung kann ich nicht antworten.\n\n`);
 	try {
-		stream.button({ command: 'vscodiumAgent.signIn', title: 'Mit Google anmelden' });
+		stream.button({ command: 'vscodiumAgent.signIn', title: SIGN_IN_PROMPT.signIn });
 	} catch (_e) { /* Button ist Komfort – der Text erklärt den Weg. */ }
 	stream.markdown('\nDanach die Frage einfach erneut senden.\n');
+}
+
+/**
+ * Merker für „Überspringen“: Wer den Dialog wegklickt, soll ihn nicht bei jeder
+ * Nachricht erneut sehen – dann genügt der Hinweis im Chat. Gilt für die Laufzeit
+ * des Fensters; nach erfolgreicher Anmeldung ist er ohnehin gegenstandslos.
+ */
+let signInDialogSkipped = false;
+
+/**
+ * Tokenverbrauch je Chat-Sitzung (Schlüssel wie bei den Tool-Läufen: die
+ * sessionResource aus dem Invocation-Token). Nur Zähler, keine Inhalte; lebt im
+ * Speicher des Fensters und verschwindet mit ihm.
+ */
+const sessionUsage = new Map();
+
+function sessionKeyOf(request) {
+	const token = request && request.toolInvocationToken;
+	if (token && token.sessionResource != null) {
+		try { return String(token.sessionResource); } catch (_e) { return 'default'; }
+	}
+	return 'default';
+}
+
+/**
+ * Sicherstellen, dass jemand angemeldet ist – sonst erscheint ein echter Dialog
+ * („Mit Google anmelden“ / „Überspringen“). Nach erfolgreicher Anmeldung läuft die
+ * Anfrage direkt weiter, die Nachricht des Nutzers geht also nicht verloren.
+ * @returns {Promise<boolean>} true = angemeldet, weitermachen
+ */
+async function ensureSignedIn(deps, stream) {
+	const { provider, logger } = deps;
+	try {
+		if (provider.auth && await provider.auth.isSignedIn()) { return true; }
+	} catch (err) {
+		logger.warn('Anmeldestatus nicht prüfbar.', err);
+	}
+
+	if (!signInDialogSkipped) {
+		const choice = await vscode.window.showInformationMessage(
+			SIGN_IN_PROMPT.message,
+			{ modal: true, detail: SIGN_IN_PROMPT.detail },
+			SIGN_IN_PROMPT.signIn,
+			SIGN_IN_PROMPT.skip
+		);
+		if (choice === SIGN_IN_PROMPT.signIn) {
+			await vscode.commands.executeCommand('vscodiumAgent.signIn');
+			try {
+				if (provider.auth && await provider.auth.isSignedIn()) {
+					provider.invalidateCatalog();
+					stream.markdown('_Angemeldet – ich mache direkt weiter._\n\n');
+					return true;
+				}
+			} catch (_e) { /* unten landet der Hinweis */ }
+		} else if (choice === SIGN_IN_PROMPT.skip) {
+			// Nicht weiter drängen: ab jetzt nur noch der Hinweis im Chat.
+			signInDialogSkipped = true;
+		}
+	}
+
+	streamSignInHint(stream);
+	return false;
 }
 
 async function buildClientOrExplain(provider, request, stream) {
@@ -145,10 +217,9 @@ async function handleAgentRequest(deps, request, chatContext, stream, token) {
 	let exitRun = null;
 	agentActivity.started();
 	try {
-		if (pickedModelId(request) === SIGN_IN_MODEL_ID) {
-			streamSignInHint(stream);
-			return {};
-		}
+		// Ohne Anmeldung führt der Weg über einen echten Dialog – auch dann, wenn die
+		// UI den Platzhalter-Eintrag „Anmelden erforderlich“ als Modell gewählt hat.
+		if (!await ensureSignedIn(deps, stream)) { return {}; }
 		if (deps.toolCount === 0) {
 			stream.markdown('**Native Tools nicht verfügbar** – dieser Build kann den Agent-Modus im nativen Chat nicht ausführen. Bitte die Agent-Ansicht (Seitenleiste) verwenden.');
 			return { errorDetails: { message: 'Native Tools nicht registriert.' } };
@@ -190,7 +261,12 @@ async function handleAgentRequest(deps, request, chatContext, stream, token) {
 			activitySummary = activity ? String(activity.summary(8, 0) || '') : undefined;
 		} catch (_e) { activitySummary = undefined; }
 
+		// Projekt-Gedächtnis: was frühere Läufe (mit Freigabe) festgehalten haben.
+		const memory = hasWorkspace ? await loadMemorySection(host, logger) : '';
+
 		const promptCtx = {
+			memory,
+			memoryRules: hasWorkspace ? MEMORY_RULES : '',
 			rootName: hasWorkspace ? host.rootName : '(kein Ordner geöffnet)',
 			platform: `${process.platform} (${process.arch})`,
 			fileTree,
@@ -232,11 +308,27 @@ async function handleAgentRequest(deps, request, chatContext, stream, token) {
 			}
 		});
 
-		const result = await run.run(request.prompt);
+		// Bild-Anhänge (Screenshots, Mockups) an die erste Nutzer-Nachricht hängen.
+		const { parts: imageParts, skipped } = imageAttachmentParts(await collectImageAttachments(request, logger));
+		if (skipped > 0) {
+			stream.markdown(`_${skipped === 1 ? 'Ein Anhang wurde' : `${skipped} Anhänge wurden`} übersprungen (nur PNG, JPEG, WebP oder GIF bis 4 MB)._\n\n`);
+		}
+		if (imageParts.length > 0) {
+			logger.info(`Nativer ${modeLabel}-Lauf: ${imageParts.length} Bild-Anhang/Anhänge übernommen.`);
+		}
+
+		const result = await run.run(request.prompt, { parts: imageParts });
 		// viaText-Summaries wurden schon während des Laufs gestreamt – nicht doppeln.
 		if (result.status === 'completed' && result.summary && !result.viaText) {
 			stream.markdown(`${result.summary}\n\n`);
 		}
+
+		// Tokenverbrauch: dieser Lauf und – ab dem zweiten – die Summe der Sitzung.
+		const key = sessionKeyOf(request);
+		const total = addUsage(sessionUsage.get(key), run.usage);
+		sessionUsage.set(key, total);
+		const usageLine = buildUsageLine(run.usage, total);
+		if (usageLine) { stream.markdown(`${usageLine}\n`); }
 		if (!hasWorkspace) {
 			// Zwei klare Wege für Einsteiger direkt unter der Antwort.
 			try {
@@ -287,6 +379,48 @@ async function invokeNativeTool(request, name, args, token) {
 		}
 		return { error: String(err && err.message ? err.message : err) };
 	}
+}
+
+/**
+ * Projekt-Gedächtnis laden: eigene Datei zuerst, sonst verbreitete Agenten-Dateien
+ * anderer Werkzeuge (nur lesend). Fehlt alles, läuft der Agent wie bisher.
+ * @returns {Promise<string>} fertiger Prompt-Abschnitt oder ''
+ */
+async function loadMemorySection(host, logger) {
+	for (const candidate of [MEMORY_PATH, ...COMPAT_PATHS]) {
+		try {
+			if (!await host.fileExists(candidate)) { continue; }
+			const text = await host.readFile(candidate);
+			if (text && text.trim()) {
+				return buildMemorySection(text, candidate);
+			}
+		} catch (err) {
+			logger.warn(`Projekt-Gedächtnis (${candidate}) nicht lesbar.`, err);
+		}
+	}
+	return '';
+}
+
+/**
+ * Bild-Anhänge einer Anfrage einsammeln (Screenshots, Mockups – per Drag-and-drop
+ * oder Einfügen). VS Code liefert sie als Referenzen mit Binärdaten
+ * (`ChatReferenceBinaryData`, Proposal `chatReferenceBinaryData`); ältere Basen
+ * kennen das nicht – dann kommt einfach nichts zurück.
+ * @returns {Promise<Array<{ mimeType: string, data: Uint8Array }>>}
+ */
+async function collectImageAttachments(request, logger) {
+	const out = [];
+	for (const ref of (request && request.references) || []) {
+		const value = ref && ref.value;
+		// Duck-Typing: Binärdaten-Referenzen tragen mimeType + data().
+		if (!value || typeof value !== 'object' || typeof value.data !== 'function' || !value.mimeType) { continue; }
+		try {
+			out.push({ mimeType: String(value.mimeType), data: await value.data() });
+		} catch (err) {
+			logger.warn('Bild-Anhang konnte nicht gelesen werden.', err);
+		}
+	}
+	return out;
 }
 
 function isCancellationLike(err) {

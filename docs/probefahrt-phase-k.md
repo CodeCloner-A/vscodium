@@ -76,7 +76,7 @@ cd /c/Users/ergin/Desktop/VSCode-Fork/vscodium
 4. Lege dir eine **Spielwiese** an: einen neuen Ordner `C:\Users\ergin\Desktop\probefahrt-spielwiese` (leer ist okay). Öffne ihn in der Test-Version: Datei → Ordner öffnen.
 5. Es kommt eine Frage, ob du dem Ordner **vertraust** → **„Ja, ich vertraue den Autoren"**. (Ohne Vertrauen darf der Agent keine Dateien anfassen — das ist Absicht.)
 
-**Orientierung — es gibt jetzt ZWEI Chats:** Links in der Seitenleiste das Roboter-Symbol „Agent" — das ist der **alte** selbstgebaute Chat (bleibt vorerst als Fallback). **Getestet wird der NEUE:** Drücke **Strg+Alt+I** — rechts öffnet sich der native Chat mit einem Eingabefeld, das unten zwei kleine Auswahlfelder hat (Modus und Modell). Um den geht es in allen folgenden Tests.
+**Orientierung (seit v0.17.0):** Es gibt genau **einen** Chat — den nativen. Drücke **Strg+Alt+I**: Rechts öffnet sich der Chat mit einem Eingabefeld, das unten zwei kleine Auswahlfelder hat (Modus und Modell). Das frühere „Agent"-Symbol in der linken Leiste (eigenes Webview) ist entfallen; alle Tests unten beziehen sich auf den nativen Chat.
 
 ---
 

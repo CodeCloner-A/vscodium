@@ -24,7 +24,7 @@ const CONTEXT_LINES = 40;
 
 class InlineEditController {
 	/**
-	 * @param {import('./chatViewProvider').ChatViewProvider} provider
+	 * @param {import('./agentService').AgentService} provider  Kern-Dienst (config/buildClient)
 	 * @param {ReturnType<import('../lib/logger').createLogger>} logger
 	 */
 	constructor(provider, logger) {

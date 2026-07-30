@@ -1,6 +1,11 @@
 /*---------------------------------------------------------------------------------------------
- * VSCodium Agent – Workspace-Host: implementiert das Tool-Host-Interface mit VS-Code-APIs.
- * Enthält Review-Gating (Diff-Vorschau + Bestätigung) und Kommando-Ausführung.
+ * PHI47 – Workspace-Host: implementiert das Tool-Host-Interface mit VS-Code-APIs
+ * (Lesen, Suchen, Undo-sicheres Schreiben, Kommando-Ausführung).
+ *
+ * Freigaben und Diff-Ansicht liefert seit v0.17.0 der native Chat: Tool-Rückfragen
+ * kommen aus `prepareInvocation.confirmationMessages`, Änderungen laufen als
+ * `textEdit`-Stream ins Multi-File-Review (`NativeRunHost` in ui/nativeTools.js).
+ * Die eigene Diff-Vorschau (`vscodium-agent-diff`-Schema) ist mit dem Webview entfallen.
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
@@ -10,8 +15,6 @@ const cp = require('child_process');
 const path = require('path');
 const { NOOP_LOGGER } = require('./logger');
 const { stripAnsi, normalizeCommandApproval, capText } = require('./terminalExec');
-
-const DIFF_SCHEME = 'vscodium-agent-diff';
 
 const EXCLUDED_DIRS = [
 	'node_modules', '.git', 'dist', 'out', 'build', '.next', '.nuxt', '.venv', 'venv',
@@ -262,33 +265,6 @@ class WorkspaceHost {
 		} catch (_e) {
 			return false;
 		}
-	}
-
-	/** Diff-Vorschau für eine (auch bereits entschiedene) Änderung öffnen. */
-	async openDiff(changeId) {
-		const record = this.changes.get(changeId);
-		if (!record) {
-			void vscode.window.showWarningMessage('Änderung nicht mehr verfügbar.');
-			return;
-		}
-		const base = path.posix.basename(record.path.replace(/\\/g, '/'));
-		const left = vscode.Uri.parse(`${DIFF_SCHEME}:/${changeId}/left/${base}`);
-		const right = vscode.Uri.parse(`${DIFF_SCHEME}:/${changeId}/right/${base}`);
-		const label = { create: 'Neu', modify: 'Änderung', delete: 'Löschen' }[record.kind] || 'Änderung';
-		await vscode.commands.executeCommand('vscode.diff', left, right, `Agent · ${label}: ${record.path}`);
-	}
-
-	/** TextDocumentContentProvider für die Diff-Vorschau. */
-	createDiffContentProvider() {
-		const changes = this.changes;
-		return {
-			provideTextDocumentContent(uri) {
-				const parts = uri.path.split('/').filter(Boolean); // [id, side, name]
-				const record = changes.get(parts[0]);
-				if (!record) { return ''; }
-				return parts[1] === 'left' ? record.oldContent : record.newContent;
-			}
-		};
 	}
 
 	// ── Kommandos ─────────────────────────────────────────────────────────────
@@ -565,4 +541,4 @@ function killTree(pid) {
 	}
 }
 
-module.exports = { WorkspaceHost, DIFF_SCHEME, EXCLUDED_DIRS, globToRegExp, renderTree };
+module.exports = { WorkspaceHost, EXCLUDED_DIRS, globToRegExp, renderTree };

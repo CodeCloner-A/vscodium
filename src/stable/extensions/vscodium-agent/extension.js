@@ -1,17 +1,33 @@
 /*---------------------------------------------------------------------------------------------
- * VSCodium Agent – Extension-Einstiegspunkt.
+ * PHI47 – Extension-Einstiegspunkt.
+ *
+ * Seit v0.17.0 gibt es genau EINE Chat-Oberfläche: den nativen Core-Chat. Das eigene
+ * Webview (bis v0.16.0 `ui/chatViewProvider.js` samt `media/chat.*`) ist entfernt –
+ * zwei parallele Chat-UIs waren technische Schuld, die jeder Upstream-Merge bezahlt
+ * hätte. Übrig bleibt die Motor-Schicht: `ui/agentService.js` (Einstellungen, Proxy,
+ * Anmeldung, Modell-Katalog, Workspace-Host) plus die Registrierungen unten.
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
 
 const vscode = require('vscode');
-const { ChatViewProvider } = require('./ui/chatViewProvider');
+const { AgentService } = require('./ui/agentService');
 const { registerNativeChat } = require('./ui/nativeChatController');
 const { registerActivitySignal } = require('./ui/activitySignalController');
 const { registerAttachFromComputer } = require('./ui/attachFromComputer');
 const { InlineEditController } = require('./ui/inlineEditController');
 const { AgentCodeActionProvider } = require('./ui/codeActions');
-const { DIFF_SCHEME, EXCLUDED_DIRS } = require('./lib/workspaceHost');
+const { EXCLUDED_DIRS } = require('./lib/workspaceHost');
+const { MEMORY_PATH, HEADER: MEMORY_HEADER } = require('./lib/projectMemory');
+
+/** Chat öffnen und (optional) eine Frage vorbelegen – der native Chat ist die einzige Oberfläche. */
+async function openChat(query) {
+	try {
+		await vscode.commands.executeCommand('workbench.action.chat.open', query ? { query } : undefined);
+	} catch (_e) {
+		// Auf Basen ohne Core-Chat (fremder Build): still bleiben statt Fehler zu zeigen.
+	}
+}
 const { ActivityIndex } = require('./lib/activityIndex');
 const { createLogger } = require('./lib/logger');
 const { AuthManager, AUTH_SECRET_KEY } = require('./lib/authManager');
@@ -33,11 +49,11 @@ function activate(context) {
 	const activity = ActivityIndex.fromJSON(context.workspaceState.get(ACTIVITY_STATE_KEY));
 	wireActivityTracking(context, activity);
 
-	const provider = new ChatViewProvider(context, activity, logger);
+	const service = new AgentService(context, activity, logger);
 
 	// SaaS-Anmeldung (Phase S): Google-Login, Refresh-Token in SecretStorage.
 	const auth = new AuthManager({ secrets: context.secrets, log: logger });
-	provider.auth = auth;
+	service.auth = auth;
 
 	// Einmal-Migration (BYOK-Rückbau, v0.9.0): Der API-Key-Pfad ist weg, ein liegen
 	// gebliebener Key im Keyring wäre nur noch ein unnötiges Geheimnis.
@@ -51,30 +67,10 @@ function activate(context) {
 		if (e.key === AUTH_SECRET_KEY) {
 			auth.invalidate();
 			// Konto könnte gewechselt haben (An-/Abmelden, auch im anderen Fenster):
-			// den Sitzungs-Sync neu abgleichen lassen statt mit dem alten Konto-Stand
-			// weiterzuarbeiten. (Feuert auch bei Token-Rotation – ein gelegentlicher
-			// zusätzlicher Abgleich ist unkritisch, er ist idempotent.)
-			provider._pullStarted = false;
-			void provider._sendInit();
+			// der gecachte Modell-Katalog gehört zum alten Konto.
+			service.invalidateCatalog();
 		}
 	}));
-
-	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider, {
-			webviewOptions: { retainContextWhenHidden: true }
-		})
-	);
-
-	// Diff-Vorschau (virtuelle Dokumente); Provider delegiert an den jeweils aktiven Host.
-	context.subscriptions.push(
-		vscode.workspace.registerTextDocumentContentProvider(DIFF_SCHEME, {
-			provideTextDocumentContent(uri) {
-				const host = provider.host;
-				if (!host) { return ''; }
-				return host.createDiffContentProvider().provideTextDocumentContent(uri);
-			}
-		})
-	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('vscodiumAgent.testConnection', async () => {
@@ -82,7 +78,7 @@ function activate(context) {
 				{ location: vscode.ProgressLocation.Notification, title: 'Teste Agent-Proxy…' },
 				async () => {
 					try {
-						const client = await provider.buildClient();
+						const client = await service.buildClient();
 						const text = await client.ping();
 						void vscode.window.showInformationMessage(`Verbindung OK (Agent-Proxy ${client.projectId}, Modell "${client.model}"): ${text.slice(0, 80)}`);
 					} catch (err) {
@@ -129,7 +125,8 @@ function activate(context) {
 					} finally {
 						if (signInFlow === flow) { signInFlow = null; }
 					}
-					void provider._sendInit();
+					// Nach der Anmeldung liefert der Proxy ein anderes Angebot.
+					service.invalidateCatalog();
 				}
 			);
 		}),
@@ -142,7 +139,7 @@ function activate(context) {
 				logger.error('Abmelden fehlgeschlagen', err);
 				void vscode.window.showErrorMessage(`Abmelden fehlgeschlagen: ${err.message}`);
 			}
-			void provider._sendInit();
+			service.invalidateCatalog();
 		}),
 
 		vscode.commands.registerCommand('vscodiumAgent.testProxy', async () => {
@@ -197,13 +194,33 @@ function activate(context) {
 			);
 		}),
 
-		vscode.commands.registerCommand('vscodiumAgent.newSession', () => provider.newSession()),
-
 		vscode.commands.registerCommand('vscodiumAgent.openSettings', () => {
 			void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:vscodium.vscodium-agent');
 		}),
 
 		vscode.commands.registerCommand('vscodiumAgent.showLog', () => output.show(true)),
+
+		// Projekt-Gedächtnis zum Nachlesen/Bearbeiten öffnen (legt es bei Bedarf an).
+		vscode.commands.registerCommand('vscodiumAgent.openMemory', async () => {
+			const folder = (vscode.workspace.workspaceFolders || [])[0];
+			if (!folder) {
+				void vscode.window.showInformationMessage('Kein Projektordner geöffnet – das Gedächtnis gehört zu einem Projekt.');
+				return;
+			}
+			const uri = vscode.Uri.joinPath(folder.uri, ...MEMORY_PATH.split('/'));
+			try {
+				try {
+					await vscode.workspace.fs.stat(uri);
+				} catch (_e) {
+					await vscode.workspace.fs.writeFile(uri, Buffer.from(MEMORY_HEADER, 'utf8'));
+					logger.info(`Projekt-Gedächtnis angelegt: ${MEMORY_PATH}`);
+				}
+				await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+			} catch (err) {
+				logger.error('Projekt-Gedächtnis konnte nicht geöffnet werden', err);
+				void vscode.window.showErrorMessage(`Projekt-Gedächtnis konnte nicht geöffnet werden: ${err.message}`);
+			}
+		}),
 
 		// Einsteiger-Weg aus dem ordnerlosen Chat (Phase K): legt auf Klick einen
 		// neuen Projektordner unter Dokumente\VSCodium-Projekte an und öffnet ihn.
@@ -242,7 +259,7 @@ function activate(context) {
 	);
 
 	// ── Inline-Edit (Strg+I), Quick-Fixes, Terminal-Debug ───────────────────
-	const inlineEdit = new InlineEditController(provider, logger);
+	const inlineEdit = new InlineEditController(service, logger);
 	context.subscriptions.push(
 		inlineEdit,
 
@@ -257,8 +274,7 @@ function activate(context) {
 			if (!uri || !diagnostic) { return; }
 			const rel = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
 			const source = diagnostic.source ? ` (Quelle: ${diagnostic.source})` : '';
-			await vscode.commands.executeCommand('vscodiumAgent.chatView.focus');
-			void provider.runTask(
+			await openChat(
 				`Erkläre das folgende Problem in ${rel}, Zeile ${diagnostic.range.start.line + 1}, und schlage eine Behebung vor. Nur erklären, noch nichts ändern: "${diagnostic.message}"${source}`
 			);
 		}),
@@ -286,8 +302,7 @@ function activate(context) {
 			}
 			const tail = outputText.split('\n').slice(-150).join('\n').trim().slice(-12000);
 			logger.info(`Terminal-Debug gestartet (${tail.length} Zeichen Ausgabe)`);
-			await vscode.commands.executeCommand('vscodiumAgent.chatView.focus');
-			void provider.runTask(
+			await openChat(
 				`Debugge diesen Terminal-Fehler. Analysiere die Ausgabe, finde die Ursache im Projekt und schlage eine Behebung vor:\n\`\`\`\n${tail}\n\`\`\``
 			);
 		}),
@@ -300,21 +315,60 @@ function activate(context) {
 	);
 
 	// ── Nativer Core-Chat (Roadmap Phase K) ─────────────────────────────────
-	// Auf dem gepatchten Fork übernimmt die Core-Chat-UI (Default-Participant im
-	// Secondary Sidebar + Proxy-Modelle im nativen Picker). Auf fremden Basen
-	// scheitert die Registrierung kontrolliert; die Webview bleibt dann Träger.
-	registerNativeChat(context, provider, activity, logger);
+	// Die einzige Chat-Oberfläche: Default-Participant + Plan-Modi + Modell-Picker.
+	// Auf fremden Basen (ohne unsere Proposal-Freischaltung) scheitert die
+	// Registrierung kontrolliert – dann bleibt die Extension ein reiner Motor
+	// für Inline-Edit und Quick-Fixes.
+	registerNativeChat(context, service, activity, logger);
 
 	// ── KEEP IT SIMPLE: sichtbare Aktivität + einsteigerfreundlicher Datei-Anhang ──
 	registerActivitySignal(context, logger);
 	registerAttachFromComputer(context, logger);
 
-	// Agent-Chat beim IDE-Start automatisch öffnen (wie in agentischen IDEs üblich).
+	// ── Erststart: Walkthrough zeigen, danach zur Anmeldung führen ──────────
+	void firstRunExperience(context, auth, logger);
+
+	// Chat beim IDE-Start öffnen (wie in agentischen IDEs üblich).
 	const cfg = vscode.workspace.getConfiguration('vscodiumAgent');
-	if (cfg.get('openOnStartup', true) && (vscode.workspace.workspaceFolders || []).length > 0) {
-		setTimeout(() => {
-			vscode.commands.executeCommand('vscodiumAgent.chatView.focus').then(undefined, () => { /* View noch nicht bereit – unkritisch */ });
-		}, 600);
+	if (cfg.get('openOnStartup', true)) {
+		setTimeout(() => { void openChat(); }, 600);
+	}
+}
+
+/**
+ * Erster Start nach der Installation: die Willkommensseite mit dem PHI47-Walkthrough
+ * öffnen. Ist der Nutzer (auch später) nicht angemeldet, einmal pro Installation
+ * freundlich dazu einladen – nicht bei jedem Start, das nervt.
+ */
+async function firstRunExperience(context, auth, logger) {
+	const FIRST_RUN_KEY = 'phi47.firstRun.v1';
+	const SIGN_IN_PROMPT_KEY = 'phi47.signInPrompted.v1';
+	try {
+		if (!context.globalState.get(FIRST_RUN_KEY)) {
+			await context.globalState.update(FIRST_RUN_KEY, Date.now());
+			logger.info('Erststart erkannt – Willkommensseite wird geöffnet.');
+			await vscode.commands.executeCommand(
+				'workbench.action.openWalkthrough',
+				{ category: `${context.extension.id}#phi47.start` },
+				false
+			).then(undefined, () => { /* Auf fremden Basen ohne Walkthrough-Seite: still bleiben. */ });
+		}
+
+		if (context.globalState.get(SIGN_IN_PROMPT_KEY)) { return; }
+		// Kurz warten: Beim Start ist das Fenster noch mit sich selbst beschäftigt.
+		await new Promise((resolve) => setTimeout(resolve, 2500));
+		if (await auth.isSignedIn()) { return; }
+		await context.globalState.update(SIGN_IN_PROMPT_KEY, Date.now());
+		const choice = await vscode.window.showInformationMessage(
+			'Willkommen bei PHI47! Melde dich einmal mit Google an – danach steht dir der Agent mit allen Modellen zur Verfügung.',
+			'Jetzt anmelden',
+			'Später'
+		);
+		if (choice === 'Jetzt anmelden') {
+			await vscode.commands.executeCommand('vscodiumAgent.signIn');
+		}
+	} catch (err) {
+		logger.warn('Erststart-Ablauf übersprungen.', err);
 	}
 }
 

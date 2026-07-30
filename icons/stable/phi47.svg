@@ -1,5 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- PHI47 – App-Icon: φ (goldener Schnitt) auf dunklem Grund. -->
+  <!--
+    PHI47 – Marken-Icon (Quelle).
+    Aus dieser Vorlage entstehen die Build-Ressourcen unter src/stable/resources/:
+    win32/code.ico (+ Kacheln 70/150), linux/code.png + code.svg, server/code-192|512.png,
+    server/favicon.ico, darwin/code.icns. Erzeugt am 28.07.2026 mit Pillow
+    (Skript im Commit-Verlauf); Farben: Gold #E0B84A, Creme #EDE3CB, Grund #14161B.
+  -->
   <rect x="0" y="0" width="1024" height="1024" rx="190" ry="190" fill="#14161B"/>
   <rect x="6" y="6" width="1012" height="1012" rx="184" ry="184" fill="none" stroke="#E0B84A" stroke-opacity="0.27" stroke-width="8"/>
   <ellipse cx="512" cy="512" rx="205" ry="271" fill="none" stroke="#E0B84A" stroke-width="63"/>

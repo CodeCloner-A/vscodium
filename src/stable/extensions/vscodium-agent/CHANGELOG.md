@@ -4,6 +4,61 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.21.0] – 2026-07-28
+
+### Behoben
+- **Cache-Präfix repariert (spart bares Geld):** Der System-Prompt begann bisher mit Datum und letzter Editor-Aktivität — beides ändert sich bei *jedem* Lauf. Da Anbieter den unveränderten **Anfang** einer Anfrage cachen (Gemini 2.5+/3.x und Kimi automatisch, Cache-Tokens kosten ~10 %), war der Präfix damit jedes Mal wertlos: praktisch keine Treffer. Jetzt ist der Prompt strikt nach Beständigkeit sortiert — Identität und Regeln → Gedächtnis → Projektbaum → Aktivität → Datum. Gilt für Agent- und Plan-Modi und wirkt bei allen Anbietern gleichermaßen.
+
+### Hinzugefügt
+- **Kimi K3 im Angebot** (Moonshot, 1 Mio. Kontext) — der Schlüssel liegt im Tresor, der Rest lief über die vorhandene Übersetzungsschicht.
+- **Fähigkeits-Profile je Modell (Proxy v0.9.0):** Der Übersetzer schickt nur noch, was das Zielmodell wirklich versteht (Temperatur, top_p, tool_choice, Stream-Tokenzählung, Bilder, dynamische Tools). Das verhindert 400er-Fehler bei Anbietern, die unbekannte Felder nicht ignorieren.
+- **Bilder im Chat (Vision):** Screenshots und Mockups lassen sich anhängen und werden bis zum Modell durchgereicht (PNG, JPEG, WebP, GIF bis 4 MB; Proposal `chatReferenceBinaryData`). Modelle ohne Bild-Fähigkeit bekommen den Text ohne Bild statt einer Fehlermeldung; übersprungene Anhänge werden im Chat benannt.
+- **Dynamische Werkzeug-Ladung vorbereitet:** Ab 20 Werkzeugen wandern die Definitionen als nachgestellte `system`-Nachricht in die Anfrage statt in den Kopf (Kimi-K3-Funktion; hält den Cache-Präfix stabil). Mit unseren 10 Werkzeugen bleibt vorerst alles beim Alten — die Mechanik steht für MCP-Server bereit.
+
+## [0.20.0] – 2026-07-28
+
+### Hinzugefügt
+- **Token-Anzeige im Chat:** Unter jeder Antwort steht jetzt, was sie gekostet hat — „Tokens · Lauf 12,4k (Anfrage 9,8k · Antwort 2,6k)" — und ab der zweiten Antwort zusätzlich die **Summe der ganzen Sitzung**. Gecachte Eingaben werden ausgewiesen („davon 8,0k aus dem Cache"), weil sie nur einen Bruchteil kosten. Gezählt wird über alle Modell-Schritte eines Laufs, aus den echten Zahlen des Anbieters (`usageMetadata`) — nichts geschätzt.
+
+### Geändert
+- **Nur noch die 3er-Generation im Angebot:** Die Gemini-2.5er sind aus Katalog und Standardwerten verschwunden; neu dabei ist **Gemini 3.1 Pro (Vorschau)** für komplexe Aufgaben (Standort `global`). Standardmodell ist jetzt `gemini-3.5-flash` (EU-Route), fürs Inline-Edit `gemini-3.5-flash-lite`.
+- **Kontext-Caching kommt dem Nutzer zugute (Proxy v0.8.0):** Google cached bei Gemini 2.5+/3.x automatisch (nichts einzuschalten, Mindestgröße 4096 Tokens bei den 3ern) — gecachte Eingabe-Tokens kosten nur 10 %. Der Proxy zählt sie jetzt getrennt (`cachedContentTokenCount`) und gewichtet sie in der Monats-Quote entsprechend günstiger, statt sie voll zu berechnen.
+
+## [0.19.0] – 2026-07-28
+
+### Hinzugefügt
+- **Projekt-Gedächtnis:** PHI47 merkt sich jetzt dauerhaft, was zu Deinem Projekt gehört — welche Technik es nutzt, welche Entscheidungen gefallen sind, was Du ausdrücklich (nicht) willst. Das Wissen steht in `.phi47/projekt.md` **im Projekt selbst**: einsehbar, bearbeitbar, versionierbar, löschbar — nichts davon liegt in einer Cloud-Datenbank.
+  - **Lesen:** Zu Beginn jedes Laufs (Agent- und Plan-Modi) landet die Datei im System-Prompt; widerspricht sie dem Code, gilt der Code und der Agent sagt Bescheid. Vorhandene `AGENTS.md` oder `CLAUDE.md` anderer Werkzeuge werden ebenfalls gelesen (nur lesend).
+  - **Schreiben:** Das neue Werkzeug **`remember`** hält einen Fakt fest — mit derselben Freigabe-Karte wie jede Dateiänderung („Ins Projekt-Gedächtnis aufnehmen"). Doppelte Einträge erkennt es und lässt sie weg; Geheimnisse und Tagesgeschäft sind per Prompt-Regel ausgeschlossen.
+  - Auch die Plan-Modi dürfen sich erinnern (aber weiterhin nichts am Projekt ändern) — Erkenntnisse aus einem Interview überleben so das Gespräch.
+  - Neues Kommando **„Agent: Projekt-Gedächtnis öffnen"** legt die Datei bei Bedarf an und öffnet sie zum Nachlesen.
+
+## [0.18.0] – 2026-07-28
+
+### Hinzugefügt
+- **Eigene Willkommensseite:** Statt der leer wirkenden Standardseite führt jetzt ein PHI47-Walkthrough in vier Schritten durch den Start — Anmelden, Projekt öffnen, „Sag, was entstehen soll", „Du behältst die Kontrolle". Jeder Schritt hat einen echten Knopf (Anmelden, Ordner anlegen/öffnen, Chat öffnen, Einstellungen) und eine kurze Erklärung im Markenton.
+- **Erststart führt zur Anmeldung:** Beim ersten Start nach der Installation öffnet sich die Willkommensseite; ist niemand angemeldet, lädt eine einmalige Meldung mit „Jetzt anmelden" dazu ein (Merker im globalen Zustand — die Einladung kommt nicht bei jedem Start).
+- **Anmelde-Dialog direkt aus dem Chat:** Wer ohne Anmeldung einfach drauflosschreibt, bekommt jetzt ein echtes Dialogfenster mit **„Mit Google anmelden"** und **„Überspringen"** — statt nur eines Hinweistexts. Nach erfolgreicher Anmeldung läuft die eben getippte Frage automatisch weiter; wer überspringt, sieht künftig nur noch den kurzen Hinweis mit Anmelde-Knopf im Chat (kein Dialog bei jeder Nachricht).
+
+- **App-Icon:** Das VSCodium-Icon in Fenster, Taskleiste und Installer ist durch die PHI47-Marke ersetzt (φ in Gold auf dunklem Grund, dezente Goldkante). Erzeugt für alle Plattformen: `win32/code.ico` (9 Größen von 16 bis 256 px) samt Windows-Kacheln, `linux/code.png` + `code.svg`, `server/code-192|512.png`, `server/favicon.ico`, `darwin/code.icns`. Vektor-Quelle für spätere Änderungen: `icons/stable/phi47.svg`.
+
+### Geändert
+- **Einstellungen aufgeräumt (KEEP IT SIMPLE):** In der Oberfläche stehen nur noch **vier** Einstellungen, in sinnvoller Reihenfolge: Modell, Freigabe-Modus, Aktivitäts-Signal, Chat beim Start öffnen. Die sechs Experten-Schalter (Dienst-URL, Inline-Edit-Modell, maximale Schritte, Kommando-Timeout, Terminal-Modus, Projektbaum-Größe) sind ausgeblendet (`included: false`), lassen sich aber weiterhin in der `settings.json` setzen — ihre Beschreibungen sagen das ausdrücklich.
+- Formulierungen der sichtbaren Einstellungen auf Einsteiger umgeschrieben („Nachfragen" statt „Review-Modus", „Durcharbeiten" statt „Auto-Modus").
+
+## [0.17.0] – 2026-07-28
+
+### Entfernt
+- **Das eigene Chat-Webview ist weg — es gibt nur noch eine Chat-Oberfläche.** Zwei parallele Chat-UIs (natives Core-Chat und eigenes Webview) waren technische Schuld, die bei jedem Upstream-Merge Pflege gekostet hätte. Gelöscht: `ui/chatViewProvider.js`, `media/chat.js`, `media/chat.css`, die Aktivitätsleisten-Ansicht („Agent"-Symbol samt View), das Kommando „Neue Sitzung", die Einstellungen `sessions.sync`/`sessions.max` sowie das eigene Diff-Schema `vscodium-agent-diff` (Freigaben und Diffs liefert das native Chat-Editing). Der Chat wohnt jetzt ausschließlich im Core-Chat (Strg+Alt+I).
+
+### Geändert
+- **Motor-Schicht herausgelöst:** Einstellungen, Proxy-Client, Anmeldung, Modell-Katalog und Workspace-Host leben jetzt in `ui/agentService.js` — genutzt von nativem Chat, Inline-Edit, Quick-Fixes und den Kommandos.
+- **„Mit KI erklären" und „Terminal-Ausgabe debuggen"** öffnen den nativen Chat mit vorbelegter Frage (`workbench.action.chat.open`) statt des früheren Webviews; ebenso das automatische Öffnen beim IDE-Start.
+- `lib/sessionSync.js` bleibt samt Tests erhalten, ist aber vorerst **nicht verdrahtet** — Grundlage für den offenen Roadmap-Punkt „Chat-Sync andocken" (die Proxy-Endpunkte `/v1/sessions…` laufen unverändert weiter).
+
+### Hinzugefügt
+- Regressionswächter in den Tests: Kehren Webview-Dateien, `views`-Contributions, das Diff-Schema oder die toten Sitzungs-Einstellungen zurück, schlägt die Suite fehl.
+
 ## [0.16.0] – 2026-07-28
 
 ### Hinzugefügt

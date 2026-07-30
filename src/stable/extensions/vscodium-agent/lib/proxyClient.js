@@ -64,7 +64,7 @@ class ProxyClient {
 		if (!options.baseUrl) { throw new ProxyError('Proxy-URL fehlt (Einstellung vscodiumAgent.proxy.url).'); }
 		if (typeof options.getIdToken !== 'function') { throw new ProxyError('getIdToken fehlt.'); }
 		this.baseUrl = String(options.baseUrl).replace(/\/+$/, '');
-		this.model = normalizeModelName(options.model || 'gemini-2.5-flash');
+		this.model = normalizeModelName(options.model || '');
 		this.getIdToken = options.getIdToken;
 		this.fetchImpl = options.fetchImpl || fetch;
 		this.retryDelayMs = options.retryDelayMs === undefined ? 2500 : options.retryDelayMs;

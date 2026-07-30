@@ -12,9 +12,14 @@
  * dann auf publishers/anthropic + rawPredict/streamRawPredict um und lib/anthropic.js
  * übersetzt die Formate. Fehlender publisher = Google/Gemini.
  *
+ * ANGEBOT seit 28.07.2026: nur noch die 3er-Generation (die 2.5er sind raus – ein
+ * Modell weniger im Picker ist ein Gedanke weniger für Einsteiger, Leitsatz KEEP IT SIMPLE).
+ *
  * quotaFactor gewichtet die Tokens für die Monats-Quote (lib/metering.js), damit teure
- * Modelle die Quote entsprechend schneller verbrauchen. Basiseinheit ist gemini-2.5-flash
- * (Input $0,30 / Output $2,50 pro Mio. Tokens). Herleitung = Modellpreis ÷ Flash-Preis,
+ * Modelle die Quote entsprechend schneller verbrauchen. Basiseinheit bleibt der Preis von
+ * gemini-2.5-flash (Input $0,30 / Output $2,50 pro Mio. Tokens) – als reine Rechengröße,
+ * auch wenn das Modell selbst nicht mehr angeboten wird.
+ * Gecachte Eingabe-Tokens zählen nur zu 10 % (Google-Cache-Preis, siehe lib/metering.js). Herleitung = Modellpreis ÷ Flash-Preis,
  * eu-Multiregion +10 % (Nicht-Global-Aufschlag), kaufmännisch gerundet, nie < 1.
  * Preisstand 15.07.2026: Gemini-Preisseite (2.5-Pro $1,25/$10; 2.5-Flash-Lite $0,10/$0,40;
  * 3.5-Flash Input global $1,50 – Output dort nicht gelistet, konservativ mit demselben
@@ -50,11 +55,9 @@ const MODELS = [
 	{ id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite · flink & günstig', location: 'eu', quotaFactor: { input: 2, output: 2 } },
 	// 3.5-Flash: Input 1,65/0,30 = 5,5 → 6; Output unbekannt → wie Input (konservativ).
 	{ id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash · stark & schnell', location: 'eu', quotaFactor: { input: 6, output: 6 } },
-	{ id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash · Standard', location: 'europe-west1', quotaFactor: { input: 1, output: 1 } },
-	// 2.5-Pro: 1,25/0,30 = 4,2 → 4; 10/2,5 = 4.
-	{ id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro · komplexe Aufgaben', location: 'europe-west1', quotaFactor: { input: 4, output: 4 } },
-	// Flash-Lite ist billiger als die Basiseinheit → auf 1 aufgerundet (nie < 1).
-	{ id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite · schnell & einfach', location: 'europe-west1', quotaFactor: { input: 1, output: 1 } },
+	// 3.1 Pro (Vorschau, 28.07.2026): laut Nutzer-Verifikation nur `global`; Preise noch
+	// nicht gelistet → deutlich über Flash angesetzt (Pro-Klasse), nach Preisliste nachziehen.
+	{ id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro · Vorschau, komplexe Aufgaben', location: 'global', quotaFactor: { input: 8, output: 6 } },
 	// Claude via Vertex MaaS: Übersetzungsschicht (lib/anthropic.js) ist fertig und getestet,
 	// aber die Model-Garden-Freischaltung verlangt Firmendaten (EULA-Fragebogen: Name,
 	// Website, Branche …) – bis zur Firmengründung sind die Einträge `hidden` (KEEP IT
@@ -73,8 +76,36 @@ const MODELS = [
 	{
 		id: 'glm-5.2', label: 'GLM 5.2 · Z.ai, 1 Mio. Kontext', location: 'global (Z.ai)',
 		provider: 'zai', quotaFactor: { input: 3, output: 2 }
+	},
+	// Kimi K3 über Moonshot (OpenAI-kompatibel). Listenpreise (Stand 28.07.2026):
+	// Eingabe $3, Ausgabe $15 pro Mio. Tokens ⇒ Input 3/0,30 = 10; Output 15/2,50 = 6.
+	// Cache-Treffer kosten dort $0,30 – der Rabatt greift automatisch (siehe capabilities).
+	{
+		id: 'kimi-k3', label: 'Kimi K3 · Moonshot, 1 Mio. Kontext', location: 'global (Moonshot)',
+		provider: 'moonshot', quotaFactor: { input: 10, output: 6 },
+		capabilities: { dynamicTools: true, vision: true }
 	}
 ];
+
+/**
+ * Fähigkeiten je Modell – der Übersetzer (lib/openaiCompat.js) schickt nur, was das
+ * Modell auch versteht. Fehlt ein Eintrag, gelten diese Vorgaben.
+ *
+ * Hintergrund: Ein Anbieter quittiert unbekannte Felder gern mit 400 statt sie zu
+ * ignorieren (Kimi z. B. bei dynamischen Tools auf älteren Modellen: „tokenization failed“).
+ */
+const DEFAULT_CAPABILITIES = {
+	temperature: true,
+	topP: true,
+	toolChoice: true,
+	streamUsage: true,   // stream_options.include_usage – ohne das zählt kein Streaming-Metering
+	dynamicTools: false, // Werkzeuge per system-Nachricht nachladen (nur kimi-k3)
+	vision: false        // Bilder als Nachrichteninhalt
+};
+
+function capabilitiesOf(model) {
+	return { ...DEFAULT_CAPABILITIES, ...(model && model.capabilities ? model.capabilities : {}) };
+}
 
 function findModel(id) {
 	return MODELS.find(m => m.id === id) || null;
@@ -95,4 +126,4 @@ function publicCatalog(availableProviders) {
 		.map(m => ({ id: m.id, label: m.label, location: m.location }));
 }
 
-module.exports = { MODELS, PROVIDERS, findModel, publicCatalog };
+module.exports = { MODELS, PROVIDERS, DEFAULT_CAPABILITIES, findModel, publicCatalog, capabilitiesOf };

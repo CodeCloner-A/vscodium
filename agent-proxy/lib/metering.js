@@ -28,6 +28,12 @@ const { createMetadataTokenSource } = require('./vertex');
 
 const MAX_CACHED_USERS = 10000;
 const FIRESTORE_TIMEOUT_MS = 5000;
+/**
+ * Anteil des Eingabepreises, den gecachte Tokens kosten (Google: 10 % für alle
+ * unterstützten Gemini-Modelle ab 2.5). Wird bei der Quoten-Gewichtung angesetzt.
+ */
+const CACHED_TOKEN_PRICE_SHARE = 0.1;
+
 // Nach einem Lesefehler so lange nicht erneut lesen (Negativ-Cache): Ein hängendes
 // Firestore soll nicht jede einzelne Modell-Anfrage um den vollen Timeout verzögern.
 const FAIL_OPEN_CACHE_MS = 30_000;
@@ -208,7 +214,7 @@ function createMeter(options) {
 		const month = monthKey(now());
 		const transforms = [{ fieldPath: 'requests', increment: { integerValue: '1' } }];
 		const bump = { requests: 1 };
-		for (const field of ['promptTokens', 'candidateTokens', 'totalTokens']) {
+		for (const field of ['promptTokens', 'candidateTokens', 'totalTokens', 'cachedTokens']) {
 			const value = usage && usage[field];
 			if (Number.isFinite(value) && value > 0) {
 				transforms.push({ fieldPath: field, increment: { integerValue: String(Math.round(value)) } });
@@ -220,7 +226,15 @@ function createMeter(options) {
 		// Denk-/Zusatztokens (Gemini: totalTokenCount > prompt+candidates) werden wie
 		// Output bepreist – alles über dem Prompt zählt zum Output-Faktor.
 		const outTokens = Math.max(bump.candidateTokens || 0, (bump.totalTokens || 0) - (bump.promptTokens || 0));
-		const weighted = Math.round((bump.promptTokens || 0) * factorIn + outTokens * factorOut);
+		// Gecachte Eingabe-Tokens kosten laut Google nur 10 % des normalen Eingabepreises –
+		// dieser Rabatt gehört dem Nutzer, nicht uns: Sie zählen entsprechend weniger.
+		// (Implizites Caching ist bei Gemini 2.5+/3.x automatisch aktiv, Mindestgröße
+		// 4096 Tokens bei den 3er-Modellen; stabile Prompt-Anfänge erhöhen die Trefferquote.)
+		const cached = Math.min(bump.cachedTokens || 0, bump.promptTokens || 0);
+		const freshPromptTokens = Math.max(0, (bump.promptTokens || 0) - cached);
+		const weighted = Math.round(
+			freshPromptTokens * factorIn + cached * factorIn * CACHED_TOKEN_PRICE_SHARE + outTokens * factorOut
+		);
 		if (weighted > 0) {
 			transforms.push({ fieldPath: 'weightedTokens', increment: { integerValue: String(weighted) } });
 			bump.weightedTokens = weighted;

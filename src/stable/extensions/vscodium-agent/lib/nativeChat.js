@@ -167,8 +167,22 @@ function safeExtractText(response) {
  */
 const PLAN_MODE_TOOLS = new Set([
 	'list_files', 'read_file', 'search_project',
-	'get_diagnostics', 'get_recent_activity', 'task_complete'
+	'get_diagnostics', 'get_recent_activity',
+	// Erkenntnisse aus dem Gespräch dürfen ins Projekt-Gedächtnis – mit Freigabe.
+	// Das ist keine Projekt-Änderung, sondern die Notiz, die den Plan überlebt.
+	'remember', 'task_complete'
 ]);
+
+/**
+ * Texte des Anmelde-Dialogs (erscheint, sobald jemand ohne Anmeldung in den Chat
+ * schreibt). Hier zentral, damit Wortlaut und Knopfbeschriftungen testbar bleiben.
+ */
+const SIGN_IN_PROMPT = {
+	message: 'Für PHI47 brauchst du eine Anmeldung',
+	detail: 'Melde dich einmal mit Google an – danach antwortet der Agent und du kannst zwischen allen Modellen wählen. Deine Frage schicke ich anschließend automatisch ab.',
+	signIn: 'Mit Google anmelden',
+	skip: 'Überspringen'
+};
 
 /** Marker in den .agent.md-Instructions, an dem der Handler unsere Modi erkennt. */
 const MODE_MARKER_RE = /<!--\s*vscodium-agent:mode=([a-z][a-z0-9-]*)\s*-->/;
@@ -251,9 +265,51 @@ function toolConfirmation(name, args, approvalMode) {
 			return { title: `Datei löschen: ${a.path || '?'}`, message: a.summary || 'Der Agent möchte diese Datei löschen.' };
 		case 'run_command':
 			return { title: 'Kommando ausführen', message: `\`${a.command || '?'}\`${a.purpose ? ` — ${a.purpose}` : ''}` };
+		case 'remember':
+			return { title: 'Ins Projekt-Gedächtnis aufnehmen', message: a.fact || 'Der Agent möchte sich etwas dauerhaft merken.' };
 		default:
 			return null;
 	}
+}
+
+// ── Token-Anzeige (Verbrauch pro Lauf und Sitzung) ──────────────────────────
+
+/** Tokenzahl kompakt: 940, 12,4k, 1,2 Mio. */
+function formatTokens(n) {
+	const v = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+	if (v < 1000) { return String(v); }
+	if (v < 1000000) { return `${(v / 1000).toFixed(v < 10000 ? 1 : 0).replace('.', ',')}k`; }
+	return `${(v / 1000000).toFixed(1).replace('.', ',')} Mio.`;
+}
+
+/** Zwei Verbrauchs-Zähler addieren (Sitzungssumme über mehrere Läufe). */
+function addUsage(a, b) {
+	const pick = (o, k) => (o && Number.isFinite(o[k]) ? o[k] : 0);
+	return {
+		prompt: pick(a, 'prompt') + pick(b, 'prompt'),
+		output: pick(a, 'output') + pick(b, 'output'),
+		cached: pick(a, 'cached') + pick(b, 'cached'),
+		total: pick(a, 'total') + pick(b, 'total'),
+		steps: pick(a, 'steps') + pick(b, 'steps')
+	};
+}
+
+/**
+ * Verbrauchszeile fürs Ende einer Antwort. Zeigt den Lauf und – sobald es mehr als
+ * einen gab – die Summe der Sitzung; gecachte Eingaben werden ausgewiesen, weil sie
+ * nur einen Bruchteil kosten.
+ * @returns {string} Markdown-Zeile oder '' (nichts anzeigen)
+ */
+function buildUsageLine(run, session) {
+	if (!run || !Number.isFinite(run.total) || run.total <= 0) { return ''; }
+	const parts = [`Anfrage ${formatTokens(run.prompt)} · Antwort ${formatTokens(run.output)}`];
+	if (run.cached > 0) { parts.push(`davon ${formatTokens(run.cached)} aus dem Cache`); }
+	let line = `_Tokens · Lauf ${formatTokens(run.total)} (${parts.join(' · ')})`;
+	if (session && session.total > run.total) {
+		line += ` · Sitzung gesamt ${formatTokens(session.total)}`;
+		if (session.cached > 0) { line += ` (${formatTokens(session.cached)} gecacht)`; }
+	}
+	return `${line}_`;
 }
 
 /** Kurze Statusmeldung für die laufende Tool-Card („was passiert gerade?“). */
@@ -269,6 +325,7 @@ function toolInvocationMessage(name, args) {
 		case 'run_command': return `Führt aus: ${truncateForUi(a.command, 80)}`;
 		case 'get_recent_activity': return 'Liest die letzte Editor-Aktivität';
 		case 'get_diagnostics': return a.path ? `Prüft Diagnosen für ${a.path}` : 'Prüft Diagnosen';
+		case 'remember': return 'Merkt sich etwas fürs Projekt';
 		default: return `Führt ${name} aus`;
 	}
 }
@@ -296,6 +353,35 @@ function parseToolResultText(text) {
 	} catch (_e) {
 		return { output: s };
 	}
+}
+
+/** Vom Wire-Format unterstützte Bildtypen (alles andere wird nicht angehängt). */
+const SUPPORTED_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+/** Deckel für angehängte Bilder – Base64 bläht den Request stark auf. */
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Bild-Anhänge einer Chat-Anfrage → Gemini-Parts (`inlineData`).
+ * Erwartet bereits eingelesene Anhänge ({ mimeType, data: Buffer|Uint8Array }); die
+ * Editor-Seite holt sie aus `request.references` (siehe ui/nativeChatController.js).
+ * Zu große oder fremde Formate werden übersprungen statt den Lauf zu sprengen.
+ * @returns {{ parts: Array<object>, skipped: number }}
+ */
+function imageAttachmentParts(attachments) {
+	const parts = [];
+	let skipped = 0;
+	for (const item of Array.isArray(attachments) ? attachments : []) {
+		const mime = item && String(item.mimeType || '').toLowerCase();
+		const bytes = item && item.data;
+		if (!mime || !SUPPORTED_IMAGE_MIME.has(mime) || !bytes || !bytes.length) { skipped++; continue; }
+		if (bytes.length > MAX_IMAGE_BYTES) { skipped++; continue; }
+		const base64 = Buffer.isBuffer(bytes)
+			? bytes.toString('base64')
+			: Buffer.from(bytes).toString('base64');
+		parts.push({ inlineData: { mimeType: mime, data: base64 } });
+	}
+	return { parts, skipped };
 }
 
 /** Text aus den content-Parts eines LanguageModelToolResult ziehen (Duck-Typing). */
@@ -341,6 +427,13 @@ module.exports = {
 	streamAskResponse,
 	PLAN_MODE_TOOLS,
 	NATIVE_LM_TOOLS,
+	SIGN_IN_PROMPT,
+	formatTokens,
+	addUsage,
+	buildUsageLine,
+	SUPPORTED_IMAGE_MIME,
+	MAX_IMAGE_BYTES,
+	imageAttachmentParts,
 	parseModeMarker,
 	declarationsForMode,
 	toolsMapToNames,

@@ -16,6 +16,8 @@
 
 'use strict';
 
+const { MEMORY_PATH, appendFact } = require('./projectMemory');
+
 const MAX_READ_CHARS = 24000;
 const MAX_SEARCH_RESULTS = 60;
 const MAX_CMD_OUTPUT = 12000;
@@ -130,6 +132,17 @@ const TOOL_DECLARATIONS = [
 		}
 	},
 	{
+		name: 'remember',
+		description: 'Stores one durable fact about this project in the project memory file (chosen stack, architecture decision, user preference). Subject to user approval. Use for knowledge that still matters next week – never for transient status or secrets.',
+		parameters: {
+			type: 'OBJECT',
+			properties: {
+				fact: { type: 'STRING', description: 'One short, self-contained German sentence, e.g. "Das Projekt nutzt Flutter mit Riverpod; kein Bloc."' }
+			},
+			required: ['fact']
+		}
+	},
+	{
 		name: 'task_complete',
 		description: 'Finishes the task. Call this exactly once at the end with a German summary for the user.',
 		parameters: {
@@ -240,6 +253,26 @@ async function executeTool(host, name, args) {
 					count: diags.length,
 					diagnostics: diags.slice(0, 100).map(d => `${d.path}:${d.line} [${d.severity}${d.source ? '/' + d.source : ''}] ${d.message}`)
 				};
+			}
+			case 'remember': {
+				requireString(args.fact, 'fact');
+				// Lesen → anhängen → über den normalen Änderungsweg schreiben: Dadurch
+				// gilt für Gedächtnis-Einträge dieselbe Freigabe wie für Code-Änderungen.
+				let existing = '';
+				if (await host.fileExists(MEMORY_PATH)) {
+					existing = await host.readFile(MEMORY_PATH);
+				}
+				const { content, changed, entry } = appendFact(existing, args.fact);
+				if (!changed) {
+					return { status: 'unchanged', message: 'Steht sinngemäß schon im Projekt-Gedächtnis.', entry };
+				}
+				const result = await host.applyChange({
+					kind: 'write',
+					path: MEMORY_PATH,
+					newContent: content,
+					summary: `Projekt-Gedächtnis ergänzen: ${entry.replace(/^- \(\d{4}-\d{2}-\d{2}\)\s*/, '')}`
+				});
+				return { ...result, entry };
 			}
 			case 'task_complete': {
 				return { acknowledged: true };

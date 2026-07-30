@@ -94,7 +94,8 @@ async function testCatalogAndVertexUrl() {
 	assert.strictEqual(findModel('gemini-3.5-flash').location, 'eu', '3.5-flash läuft über die eu-Multiregion');
 	assert.strictEqual(findModel('gemini-3.6-flash').location, 'global', '3.6-flash gibt es nur global (Stand 20.07.2026)');
 	assert.strictEqual(findModel('gemini-3.5-flash-lite').location, 'eu', '3.5-flash-lite läuft über die eu-Multiregion');
-	assert.strictEqual(findModel('gemini-2.5-pro').location, 'europe-west1');
+	assert.strictEqual(findModel('gemini-3.1-pro-preview').location, 'global', '3.1 Pro Preview gibt es nur global');
+	assert.strictEqual(findModel('gemini-2.5-pro'), null, 'die 2er-Generation ist aus dem Angebot');
 	assert.strictEqual(findModel('so-ein-modell-gibts-nicht'), null);
 	assert.ok(publicCatalog().every(m => m.id && m.label && m.location));
 	// hidden (Claude bis zur Model-Garden-Freischaltung): nicht im Picker-Angebot,
@@ -155,6 +156,11 @@ async function testRateLimiterAndScanner() {
 	scanner.push(Buffer.from('data: {"candidates":[],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenC'));
 	scanner.push(Buffer.from('ount":3}}\n\ndata: {"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}\n\n'));
 	assert.deepStrictEqual(scanner.usage(), { promptTokens: 10, candidateTokens: 20, totalTokens: 30 });
+
+	// Cache-Treffer aus dem Stream werden mitgenommen (Grundlage des Quoten-Rabatts).
+	const cacheScanner = createUsageScanner();
+	cacheScanner.push(Buffer.from('data: {"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":100,"totalTokenCount":1100,"cachedContentTokenCount":800}}\n\n'));
+	assert.strictEqual(cacheScanner.usage().cachedTokens, 800);
 
 	console.log('✔ Rate-Limit (Sliding Window) & Usage-Scanner (zerteilte SSE-Chunks)');
 }
@@ -328,6 +334,29 @@ async function testMetering() {
 	);
 	assert.strictEqual(thoughtsIncrements.weightedTokens, '700', 'Denk-Tokens werden wie Output gewichtet');
 
+	// Gecachte Eingabe-Tokens kosten nur 10 % des Eingabepreises (Google-Cache-Preis) und
+	// werden entsprechend günstiger gewichtet: (1000−800)×6 + 800×6×0,1 + 100×6 = 2280.
+	const cachedFs = fakeFirestore({ usageTokens: 0 });
+	const cachedMeter = makeMeter(cachedFs);
+	await cachedMeter.record('user-123',
+		{ promptTokens: 1000, candidateTokens: 100, totalTokens: 1100, cachedTokens: 800 },
+		{ input: 6, output: 6 });
+	const cachedCommit = cachedFs.calls.filter(c => c.url.includes(':commit')).pop();
+	const cachedIncrements = Object.fromEntries(
+		cachedCommit.body.writes[0].updateTransforms.filter(t => t.increment).map(t => [t.fieldPath, t.increment.integerValue])
+	);
+	assert.strictEqual(cachedIncrements.weightedTokens, '2280', 'Cache-Rabatt gehört dem Nutzer');
+	assert.strictEqual(cachedIncrements.cachedTokens, '800', 'Cache-Treffer werden mitgezählt');
+	// Ohne Cache-Angabe bleibt es bei der vollen Gewichtung (kein stiller Rabatt).
+	const noCacheFs = fakeFirestore({ usageTokens: 0 });
+	const noCacheMeter = makeMeter(noCacheFs);
+	await noCacheMeter.record('user-123', { promptTokens: 1000, candidateTokens: 100, totalTokens: 1100 }, { input: 6, output: 6 });
+	const noCacheCommit = noCacheFs.calls.filter(c => c.url.includes(':commit')).pop();
+	const noCacheIncrements = Object.fromEntries(
+		noCacheCommit.body.writes[0].updateTransforms.filter(t => t.increment).map(t => [t.fieldPath, t.increment.integerValue])
+	);
+	assert.strictEqual(noCacheIncrements.weightedTokens, String(1000 * 6 + 100 * 6));
+
 	// UIDs, die keine Firebase-UIDs sein können, werden nie zum Firestore-Pfad.
 	const weird = await meterA.check('../fremdes-dokument');
 	assert.deepStrictEqual({ allowed: weird.allowed, status: weird.status }, { allowed: false, status: 403 });
@@ -390,13 +419,13 @@ async function testMeteringHttp() {
 		assert.deepStrictEqual({ totalTokens: usage.totalTokens, limit: usage.limit, remaining: usage.remaining }, { totalTokens: 600, limit: 1000, remaining: 400 });
 
 		// Erlaubter Lauf: record erhält die Tokenzahlen aus der JSON-Antwort …
-		assert.strictEqual((await fetch(`${base}/v1/models/gemini-2.5-flash:generateContent`, {
+		assert.strictEqual((await fetch(`${base}/v1/models/gemini-3.5-flash:generateContent`, {
 			method: 'POST', headers: auth, body: JSON.stringify({ contents: [] })
 		})).status, 200);
 		assert.deepStrictEqual(recorded[0], { uid: 'user-123', usage: { promptTokens: 3, candidateTokens: 1, totalTokens: 4 } });
 
 		// … und aus dem SSE-Strom.
-		const stream = await fetch(`${base}/v1/models/gemini-2.5-flash:streamGenerateContent`, {
+		const stream = await fetch(`${base}/v1/models/gemini-3.5-flash:streamGenerateContent`, {
 			method: 'POST', headers: auth, body: JSON.stringify({ contents: [] })
 		});
 		for await (const _chunk of stream.body) { /* Strom leeren */ }
@@ -405,7 +434,7 @@ async function testMeteringHttp() {
 		// Reißt der Strom VOR der usageMetadata ab, zählt trotzdem die Anfrage
 		// (kein Quota-Schlupfloch durch Abbrechen kurz vor Stream-Ende).
 		sseAbort = true;
-		const aborted = await fetch(`${base}/v1/models/gemini-2.5-flash:streamGenerateContent`, {
+		const aborted = await fetch(`${base}/v1/models/gemini-3.5-flash:streamGenerateContent`, {
 			method: 'POST', headers: auth, body: JSON.stringify({ contents: [] })
 		});
 		try { for await (const _chunk of aborted.body) { /* leeren */ } } catch (_e) { /* Abbruch ist ok */ }
@@ -416,7 +445,7 @@ async function testMeteringHttp() {
 		// Katalog und Verbrauchsanzeige bleiben erreichbar.
 		const callsBefore = upstreamCalls.length;
 		gateResult = { allowed: false, status: 429, reason: 'quota', error: 'Monatskontingent erschöpft (1000 von 1000 Tokens im Monat 2027-01).' };
-		const blocked = await fetch(`${base}/v1/models/gemini-2.5-flash:generateContent`, {
+		const blocked = await fetch(`${base}/v1/models/gemini-3.5-flash:generateContent`, {
 			method: 'POST', headers: auth, body: JSON.stringify({ contents: [] })
 		});
 		assert.strictEqual(blocked.status, 429);
@@ -428,7 +457,7 @@ async function testMeteringHttp() {
 
 		// Gesperrtes Konto → 403.
 		gateResult = { allowed: false, status: 403, error: 'Konto gesperrt.' };
-		assert.strictEqual((await fetch(`${base}/v1/models/gemini-2.5-flash:generateContent`, {
+		assert.strictEqual((await fetch(`${base}/v1/models/gemini-3.5-flash:generateContent`, {
 			method: 'POST', headers: auth, body: JSON.stringify({ contents: [] })
 		})).status, 403);
 
@@ -495,13 +524,13 @@ async function testHttpServer() {
 		assert.strictEqual(upstreamCalls.length, 0);
 
 		// Kaputtes JSON → 400.
-		const bad = await fetch(`${base}/v1/models/gemini-2.5-flash:generateContent`, {
+		const bad = await fetch(`${base}/v1/models/gemini-3.5-flash:generateContent`, {
 			method: 'POST', headers: auth, body: '{kein json'
 		});
 		assert.strictEqual(bad.status, 400);
 
 		// Nicht-Streaming: Antwort und Status werden durchgereicht, Usage landet im Log.
-		const gen = await fetch(`${base}/v1/models/gemini-2.5-flash:generateContent`, {
+		const gen = await fetch(`${base}/v1/models/gemini-3.5-flash:generateContent`, {
 			method: 'POST', headers: auth, body: JSON.stringify({ contents: [] })
 		});
 		assert.strictEqual(gen.status, 200);
@@ -510,7 +539,7 @@ async function testHttpServer() {
 		const genCall = upstreamCalls[upstreamCalls.length - 1];
 		assert.deepStrictEqual(
 			{ model: genCall.model, location: genCall.location, task: genCall.task },
-			{ model: 'gemini-2.5-flash', location: 'europe-west1', task: 'generateContent' }
+			{ model: 'gemini-3.5-flash', location: 'eu', task: 'generateContent' }
 		);
 		const genLog = logs[logs.length - 1];
 		assert.strictEqual(genLog.uid, 'user-123');
@@ -1382,6 +1411,64 @@ async function testOpenAiCompatTranslator() {
 	console.log('✔ OpenAI-kompatible Übersetzung: Request/Tools/Schema, Antwort, SSE (zerteilt, Tool-Calls, Usage)');
 }
 
+async function testCapabilitiesAndVision() {
+	const { toOpenAiRequest, toImageBlock, DYNAMIC_TOOLS_THRESHOLD } = require('../lib/openaiCompat');
+	const { findModel, capabilitiesOf, DEFAULT_CAPABILITIES } = require('../lib/catalog');
+
+	// Kimi K3 ist im Angebot, mit Preis-Gewichtung aus den Listenpreisen ($3/$15).
+	const kimi = findModel('kimi-k3');
+	assert.ok(kimi && kimi.provider === 'moonshot');
+	assert.deepStrictEqual(kimi.quotaFactor, { input: 10, output: 6 });
+	// Fähigkeiten: Vorgaben plus modellspezifische Zusätze.
+	assert.strictEqual(DEFAULT_CAPABILITIES.dynamicTools, false, 'Sonderfunktionen sind standardmäßig aus');
+	assert.strictEqual(DEFAULT_CAPABILITIES.streamUsage, true, 'ohne Stream-Usage zählt das Metering nicht');
+	assert.deepStrictEqual(capabilitiesOf(kimi), { ...DEFAULT_CAPABILITIES, dynamicTools: true, vision: true });
+	assert.strictEqual(capabilitiesOf(findModel('glm-5.2')).vision, false);
+	assert.deepStrictEqual(capabilitiesOf(undefined), DEFAULT_CAPABILITIES);
+
+	// Bilder: nur an Modelle, die sie können – sonst stillschweigend weglassen.
+	const withImage = {
+		contents: [{ role: 'user', parts: [{ text: 'Was ist das?' }, { inlineData: { mimeType: 'image/png', data: 'AAAA' } }] }]
+	};
+	const visionMsg = toOpenAiRequest(withImage, { model: 'kimi-k3', capabilities: kimi.capabilities }).messages[0];
+	assert.deepStrictEqual(visionMsg.content, [
+		{ type: 'text', text: 'Was ist das?' },
+		{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }
+	]);
+	assert.strictEqual(toOpenAiRequest(withImage, { model: 'glm-5.2' }).messages[0].content, 'Was ist das?');
+	assert.strictEqual(toImageBlock({ inlineData: { data: 'X' } }).image_url.url, 'data:image/png;base64,X', 'Standard-MIME ist PNG');
+	assert.strictEqual(toImageBlock({ text: 'kein Bild' }), null);
+	// Reines Bild ohne Text bleibt eine gültige Nachricht.
+	const imageOnly = toOpenAiRequest({ contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'image/jpeg', data: 'B' } }] }] },
+		{ model: 'kimi-k3', capabilities: kimi.capabilities });
+	assert.strictEqual(imageOnly.messages[0].content.length, 1);
+
+	// Parameter-Gating: was das Modell nicht kann, wird nicht gesendet.
+	const body = { contents: [{ role: 'user', parts: [{ text: 'hi' }] }], generationConfig: { temperature: 0.2, topP: 0.9 } };
+	const lean = toOpenAiRequest(body, { model: 'x', stream: true, capabilities: { temperature: false, topP: false, streamUsage: false } });
+	assert.strictEqual(lean.temperature, undefined);
+	assert.strictEqual(lean.top_p, undefined);
+	assert.strictEqual(lean.stream_options, undefined, 'ohne Fähigkeit kein stream_options');
+	assert.strictEqual(lean.stream, true);
+	const full = toOpenAiRequest(body, { model: 'x', stream: true });
+	assert.deepStrictEqual({ t: full.temperature, p: full.top_p, s: full.stream_options }, { t: 0.2, p: 0.9, s: { include_usage: true } });
+
+	// Dynamische Tool-Ladung: erst ab der Schwelle, dann als system-Nachricht OHNE content.
+	const decls = (n) => [{ functionDeclarations: Array.from({ length: n }, (_, i) => ({ name: `t${i}`, description: 'd', parameters: { type: 'OBJECT', properties: {} } })) }];
+	const few = toOpenAiRequest({ ...body, tools: decls(DYNAMIC_TOOLS_THRESHOLD - 1) }, { model: 'kimi-k3', capabilities: kimi.capabilities });
+	assert.ok(Array.isArray(few.tools) && !few.messages.some(m => m.tools), 'unter der Schwelle bleibt es beim Top-Level-Feld');
+	const many = toOpenAiRequest({ ...body, tools: decls(DYNAMIC_TOOLS_THRESHOLD) }, { model: 'kimi-k3', capabilities: kimi.capabilities });
+	assert.strictEqual(many.tools, undefined);
+	const toolMsg = many.messages.find(m => m.tools);
+	assert.ok(toolMsg && toolMsg.role === 'system' && toolMsg.content === undefined, 'system-Nachricht mit tools darf kein content tragen');
+	assert.strictEqual(toolMsg.tools.length, DYNAMIC_TOOLS_THRESHOLD);
+	assert.strictEqual(many.messages[many.messages.length - 1], toolMsg, 'Tool-Nachricht gehört ans Ende (Cache-Präfix bleibt heil)');
+	// Ohne die Fähigkeit bleibt es beim Top-Level-Feld, egal wie viele Tools.
+	assert.ok(Array.isArray(toOpenAiRequest({ ...body, tools: decls(DYNAMIC_TOOLS_THRESHOLD + 5) }, { model: 'glm-5.2' }).tools));
+
+	console.log('✔ Fähigkeits-Profile: Kimi K3 im Katalog, Parameter-Gating, Bilder nur mit Vision, dynamische Tools ab Schwelle');
+}
+
 async function testGlmHttp() {
 	const { createOpenAiClient } = require('../lib/openaiCompat');
 	const { publicCatalog } = require('../lib/catalog');
@@ -1467,6 +1554,7 @@ async function main() {
 	await testAnthropicTranslator();
 	await testClaudeHttp();
 	await testOpenAiCompatTranslator();
+	await testCapabilitiesAndVision();
 	await testGlmHttp();
 	await testSessionStore();
 	await testSessionsHttp();

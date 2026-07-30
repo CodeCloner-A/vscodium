@@ -482,7 +482,8 @@
     "vscodium.vscodium-agent": [
       "defaultChatParticipant",
       "chatParticipantAdditions",
-      "chatContextProvider"
+      "chatContextProvider",
+      "chatReferenceBinaryData"
     ]
   },
   "extensionKind": {

@@ -2,7 +2,7 @@
   "name": "vscodium-agent",
   "displayName": "PHI47 Agent",
   "description": "Der Agent von PHI47: Code generieren, refactoren, Fehler finden und beheben, Multi-File-Änderungen, Tests ausführen und iterieren – mit Projektkontext und Review.",
-  "version": "0.16.0",
+  "version": "0.21.0",
   "publisher": "vscodium",
   "license": "MIT",
   "engines": {
@@ -26,14 +26,14 @@
     }
   },
   "activationEvents": [
-    "onStartupFinished",
-    "onView:vscodiumAgent.chatView"
+    "onStartupFinished"
   ],
   "main": "./extension.js",
   "enabledApiProposals": [
     "defaultChatParticipant",
     "chatParticipantAdditions",
-    "chatContextProvider"
+    "chatContextProvider",
+    "chatReferenceBinaryData"
   ],
   "contributes": {
     "chatParticipants": [
@@ -204,6 +204,23 @@
         }
       },
       {
+        "name": "remember",
+        "toolReferenceName": "remember",
+        "displayName": "Ins Projekt-Gedächtnis aufnehmen",
+        "userDescription": "Hält dauerhaftes Projektwissen fest (mit Deiner Freigabe).",
+        "modelDescription": "Stores one durable fact about this project in the project memory file (chosen stack, architecture decision, user preference). Subject to user approval. Use for knowledge that still matters next week – never for transient status or secrets.",
+        "icon": "$(bookmark)",
+        "tags": ["vscodium-agent"],
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "fact": { "type": "string", "description": "One short, self-contained German sentence, e.g. \"Das Projekt nutzt Flutter mit Riverpod; kein Bloc.\"" }
+          },
+          "required": ["fact"]
+        }
+      },
+      {
         "name": "get_diagnostics",
         "toolReferenceName": "get_diagnostics",
         "displayName": "Diagnosen lesen",
@@ -224,6 +241,43 @@
       {
         "vendor": "vscodium-agent",
         "displayName": "VSCodium Agent"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "phi47.start",
+        "title": "PHI47 startklar machen",
+        "description": "Anmelden, Projekt öffnen, loslegen – in drei Minuten.",
+        "steps": [
+          {
+            "id": "phi47.signIn",
+            "title": "Mit Google anmelden",
+            "description": "PHI47 bringt die KI mit – ohne API-Schlüssel, ohne Konfiguration. Einmal anmelden, dann steht die Modellauswahl bereit.\n[Mit Google anmelden](command:vscodiumAgent.signIn)",
+            "media": { "markdown": "media/walkthrough/anmelden.md", "altText": "Anmeldung mit Google" },
+            "completionEvents": ["onCommand:vscodiumAgent.signIn"]
+          },
+          {
+            "id": "phi47.project",
+            "title": "Projekt öffnen",
+            "description": "Ein Projekt ist ein Ordner auf deinem Computer – dort und nur dort arbeitet der Agent.\n[Neuen Projektordner anlegen](command:vscodiumAgent.createWorkspace)\n[Vorhandenen Ordner öffnen](command:workbench.action.files.openFolder)",
+            "media": { "markdown": "media/walkthrough/projekt.md", "altText": "Projektordner öffnen" },
+            "completionEvents": ["onCommand:vscodiumAgent.createWorkspace", "onCommand:workbench.action.files.openFolder"]
+          },
+          {
+            "id": "phi47.chat",
+            "title": "Sag, was entstehen soll",
+            "description": "Der Chat ist die Kommandozentrale: beschreiben, was du willst – PHI47 plant, schreibt und führt aus.\n[Chat öffnen (Strg+Alt+I)](command:workbench.action.chat.open)",
+            "media": { "markdown": "media/walkthrough/chat.md", "altText": "Chat mit Modus- und Modellauswahl" },
+            "completionEvents": ["onCommand:workbench.action.chat.open"]
+          },
+          {
+            "id": "phi47.control",
+            "title": "Du behältst die Kontrolle",
+            "description": "Jede Änderung und jeder Befehl wird dir zur Freigabe vorgelegt; Änderungen kannst du pro Datei annehmen oder verwerfen.\n[Einstellungen öffnen](command:vscodiumAgent.openSettings)",
+            "media": { "markdown": "media/walkthrough/kontrolle.md", "altText": "Freigaben und Review" },
+            "completionEvents": ["onCommand:vscodiumAgent.openSettings"]
+          }
+        ]
       }
     ],
     "themes": [
@@ -250,25 +304,6 @@
         "displayName": "Dateien vom Computer"
       }
     ],
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "vscodium-agent",
-          "title": "Agent",
-          "icon": "media/agent.svg"
-        }
-      ]
-    },
-    "views": {
-      "vscodium-agent": [
-        {
-          "type": "webview",
-          "id": "vscodiumAgent.chatView",
-          "name": "Agent",
-          "icon": "media/agent.svg"
-        }
-      ]
-    },
     "commands": [
       {
         "command": "vscodiumAgent.testConnection",
@@ -296,12 +331,6 @@
         "category": "Agent"
       },
       {
-        "command": "vscodiumAgent.newSession",
-        "title": "Neue Sitzung",
-        "category": "Agent",
-        "icon": "$(add)"
-      },
-      {
         "command": "vscodiumAgent.openSettings",
         "title": "Agent-Einstellungen öffnen",
         "category": "Agent",
@@ -320,6 +349,11 @@
       {
         "command": "vscodiumAgent.attachFilesFromComputer",
         "title": "Dateien vom Computer zum Chat hinzufügen",
+        "category": "Agent"
+      },
+      {
+        "command": "vscodiumAgent.openMemory",
+        "title": "Projekt-Gedächtnis öffnen",
         "category": "Agent"
       },
       {
@@ -352,18 +386,6 @@
       }
     ],
     "menus": {
-      "view/title": [
-        {
-          "command": "vscodiumAgent.newSession",
-          "when": "view == vscodiumAgent.chatView",
-          "group": "navigation@1"
-        },
-        {
-          "command": "vscodiumAgent.openSettings",
-          "when": "view == vscodiumAgent.chatView",
-          "group": "navigation@2"
-        }
-      ],
       "terminal/context": [
         {
           "command": "vscodiumAgent.debugTerminal",
@@ -382,39 +404,31 @@
       ]
     },
     "configuration": {
-      "title": "VSCodium Agent",
+      "title": "PHI47",
       "properties": {
-        "vscodiumAgent.proxy.url": {
-          "type": "string",
-          "default": "https://agent-proxy-476281311476.europe-west1.run.app",
-          "markdownDescription": "Basis-URL des PHI47-Proxys (Cloud Run). Der Proxy prüft die Anmeldung, hält Geheimnisse (Auth-Relay) und routet die Modelle serverseitig (siehe `docs/agent-proxy.md`)."
-        },
         "vscodiumAgent.model": {
           "type": "string",
-          "default": "gemini-2.5-flash",
-          "markdownDescription": "Modellname, z. B. `gemini-3.6-flash` oder `gemini-2.5-pro`. Bequemer über den Modell-Picker – das Angebot bestimmt der Proxy, Standort-Routing inklusive."
-        },
-        "vscodiumAgent.inlineEdit.model": {
-          "type": "string",
-          "default": "gemini-2.5-flash",
-          "markdownDescription": "Modell für Inline-Edit (Strg+I), Quick-Fixes und „In Datei übernehmen“. Latenz zählt hier mehr als Tiefe – `gemini-2.5-flash` empfohlen."
+          "default": "gemini-3.5-flash",
+          "order": 1,
+          "markdownDescription": "Welche KI antwortet. Bequemer über den Modell-Picker unten im Chat – das Angebot bestimmt der Dienst."
         },
         "vscodiumAgent.openOnStartup": {
           "type": "boolean",
           "default": true,
-          "description": "Agent-Chat beim Start der IDE automatisch öffnen."
+          "order": 4,
+          "description": "Chat beim Start der IDE automatisch öffnen."
         },
-        "vscodiumAgent.sessions.sync": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Chat-Sitzungen geräteübergreifend synchronisieren (pro Google-Konto und Projekt, über den Agent-Proxy in Firestore). Lokal bleiben die Sitzungen immer erhalten (Offline-Cache)."
+        "vscodiumAgent.proxy.url": {
+          "type": "string",
+          "default": "https://agent-proxy-476281311476.europe-west1.run.app",
+          "included": false,
+          "markdownDescription": "Experten-Einstellung (nur über settings.json): Basis-URL des PHI47-Dienstes. Er prüft die Anmeldung, hält die Geheimnisse und routet die Modelle serverseitig (siehe `docs/agent-proxy.md`)."
         },
-        "vscodiumAgent.sessions.max": {
-          "type": "number",
-          "default": 20,
-          "minimum": 1,
-          "maximum": 100,
-          "description": "Maximal gespeicherte Sitzungen pro Projekt (älteste werden entfernt)."
+        "vscodiumAgent.inlineEdit.model": {
+          "type": "string",
+          "default": "gemini-3.5-flash-lite",
+          "included": false,
+          "markdownDescription": "Experten-Einstellung (nur über settings.json): Modell für Inline-Edit (Strg+I) und Quick-Fixes. Latenz zählt hier mehr als Tiefe."
         },
         "vscodiumAgent.approvalMode": {
           "type": "string",
@@ -423,25 +437,34 @@
             "auto"
           ],
           "default": "review",
+          "order": 2,
           "enumDescriptions": [
-            "Review-Modus: Dateiänderungen und Kommandos erfordern Deine Bestätigung (Diff-Vorschau).",
-            "Auto-Modus: Der Agent wendet Änderungen direkt an und führt Kommandos ohne Rückfrage aus."
+            "Nachfragen: Jede Dateiänderung und jedes Kommando wird Dir zur Freigabe vorgelegt (empfohlen).",
+            "Durcharbeiten: Der Agent ändert und führt aus, ohne zu fragen. Änderungen kannst Du weiterhin im Editor verwerfen."
           ],
-          "description": "Wie viel Kontrolle Du über Aktionen des Agenten behältst."
+          "description": "Wie viel Kontrolle Du über die Aktionen des Agenten behältst."
+        },
+        "vscodiumAgent.activitySignal": {
+          "type": "boolean",
+          "default": true,
+          "order": 3,
+          "description": "Sichtbare Aktivität: Statusleisten-Anzeige und farbige Rahmen, solange ein Kommando läuft oder der Agent arbeitet."
         },
         "vscodiumAgent.maxIterations": {
           "type": "number",
           "default": 24,
           "minimum": 2,
           "maximum": 100,
-          "description": "Maximale Anzahl Modell-Schritte pro Aufgabe (Schutz gegen Endlosschleifen/Agent-Drift)."
+          "included": false,
+          "description": "Experten-Einstellung (nur über settings.json): Maximale Anzahl Modell-Schritte pro Aufgabe (Schutz gegen Endlosschleifen)."
         },
         "vscodiumAgent.commandTimeoutSec": {
           "type": "number",
           "default": 180,
           "minimum": 5,
           "maximum": 1800,
-          "description": "Timeout in Sekunden für vom Agenten ausgeführte Kommandos (z. B. Testläufe)."
+          "included": false,
+          "description": "Experten-Einstellung (nur über settings.json): Timeout in Sekunden für vom Agenten ausgeführte Kommandos."
         },
         "vscodiumAgent.terminal.mode": {
           "type": "string",
@@ -450,21 +473,18 @@
             "terminal"
           ],
           "default": "captured",
+          "included": false,
           "enumDescriptions": [
             "Kommandos laufen unsichtbar im Hintergrund; der Agent erhält die Ausgabe (Standard).",
-            "Kommandos laufen sichtbar im „Agent“-Terminal (braucht Shell-Integration; sonst automatischer Rückfall auf den Hintergrund-Modus). Ohne stdout/stderr-Trennung."
+            "Kommandos laufen sichtbar im Terminal-Panel (braucht Shell-Integration; sonst automatischer Rückfall)."
           ],
-          "markdownDescription": "Wo vom Agenten freigegebene Kommandos (`run_command`) ausgeführt werden."
+          "markdownDescription": "Experten-Einstellung (nur über settings.json): Wo vom Agenten freigegebene Kommandos ausgeführt werden."
         },
         "vscodiumAgent.context.maxTreeEntries": {
           "type": "number",
           "default": 250,
-          "description": "Maximale Anzahl Dateien/Ordner, die dem Modell als Projektbaum gezeigt werden."
-        },
-        "vscodiumAgent.activitySignal": {
-          "type": "boolean",
-          "default": true,
-          "description": "Sichtbare Aktivität: Statusleisten-Anzeige und farbige Rahmen, solange ein Terminal-Kommando oder ein Agent-Lauf aktiv ist."
+          "included": false,
+          "description": "Experten-Einstellung (nur über settings.json): Maximale Anzahl Dateien/Ordner, die dem Modell als Projektbaum gezeigt werden."
         }
       }
     }

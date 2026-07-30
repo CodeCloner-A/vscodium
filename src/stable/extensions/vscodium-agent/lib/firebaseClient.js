@@ -82,13 +82,19 @@ function mergeStreamResponses(chunks) {
 	return merged;
 }
 
+/**
+ * Rückfall-Modell, wenn gar nichts angegeben ist. Seit 28.07.2026 die 3er-Generation
+ * (EU-Route bevorzugt); das Angebot bestimmt ohnehin der Proxy.
+ */
+const DEFAULT_MODEL = 'gemini-3.5-flash';
+
 /** "models/x" | "publishers/google/models/x" | "x" → "x" */
 function normalizeModelName(name) {
 	const trimmed = String(name || '').trim();
 	// Leere Segmente (z. B. trailing Slash) fallen weg, statt still auf das
 	// Default-Modell umzuleiten; nur wirklich leere Eingabe erhält den Default.
 	const parts = trimmed.split('/').filter(Boolean);
-	return parts.length > 0 ? parts[parts.length - 1] : 'gemini-2.5-flash';
+	return parts.length > 0 ? parts[parts.length - 1] : DEFAULT_MODEL;
 }
 
 /** Erste Text-Teile einer Antwort extrahieren. */

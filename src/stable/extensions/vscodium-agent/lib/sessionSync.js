@@ -1,10 +1,16 @@
 /*---------------------------------------------------------------------------------------------
- * VSCodium Agent – Sync-Logik für Chat-Sitzungen (pur, ohne vscode-Abhängigkeit).
+ * PHI47 – Sync-Logik für Chat-Sitzungen (pur, ohne vscode-Abhängigkeit).
  *
- * Sitzungen leben lokal im workspaceState (Offline-Cache) und – pro Nutzer und Projekt –
- * in Firestore hinter dem Proxy. Konfliktauflösung: last-write-wins pro Sitzung über
- * updatedAt; hier wird nur ENTSCHIEDEN, was zu holen/hochzuladen ist, die Netzarbeit
- * macht der ChatViewProvider mit dem ProxyClient.
+ * Sitzungen leben lokal (Offline-Cache) und – pro Nutzer und Projekt – in Firestore
+ * hinter dem Proxy. Konfliktauflösung: last-write-wins pro Sitzung über updatedAt;
+ * hier wird nur ENTSCHIEDEN, was zu holen/hochzuladen ist, die Netzarbeit macht der
+ * Aufrufer mit dem ProxyClient.
+ *
+ * STATUS seit v0.17.0: derzeit NICHT verdrahtet. Der Produzent war das Chat-Webview,
+ * das mit dem Rückbau der doppelten Chat-UI entfallen ist; die Sitzungen führt jetzt
+ * der native Core-Chat. Diese Logik (samt Tests) bleibt als Grundlage für den offenen
+ * Roadmap-Punkt „Chat-Sync andocken" stehen – die Proxy-Endpunkte `/v1/sessions…`
+ * laufen unverändert weiter.
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';

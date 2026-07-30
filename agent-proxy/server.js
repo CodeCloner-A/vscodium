@@ -113,11 +113,17 @@ function readJson(req, maxBytes) {
 function extractUsage(text) {
 	try {
 		const u = JSON.parse(text).usageMetadata;
-		return u ? {
+		if (!u) { return undefined; }
+		const usage = {
 			promptTokens: u.promptTokenCount,
 			candidateTokens: u.candidatesTokenCount,
 			totalTokens: u.totalTokenCount
-		} : undefined;
+		};
+		// Aus dem Kontext-Cache bediente Eingabe-Tokens (implizites Caching ist bei
+		// Gemini 2.5+/3.x standardmäßig aktiv). Nur setzen, wenn der Anbieter sie meldet –
+		// sie kosten nur 10 % und werden in der Quote entsprechend gewichtet (lib/metering.js).
+		if (Number.isFinite(u.cachedContentTokenCount)) { usage.cachedTokens = u.cachedContentTokenCount; }
+		return usage;
 	} catch (_e) {
 		return undefined;
 	}

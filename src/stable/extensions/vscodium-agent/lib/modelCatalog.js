@@ -21,14 +21,12 @@ const { normalizeModelName } = require('./firebaseClient');
  */
 const MODEL_CATALOG = [
 	{ id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash · neueste Generation', vertexLocations: ['global'] },
+	{ id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash · stark & schnell', vertexLocations: ['global'] },
+	{ id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite · flink & günstig', vertexLocations: ['global'] },
+	{ id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro · Vorschau, komplexe Aufgaben', vertexLocations: ['global'] },
 	// Fremd-Anbieter (Z.ai) – Routing macht der Proxy; hier nur fürs Picker-Label,
 	// falls der Server-Katalog einmal nicht erreichbar ist.
-	{ id: 'glm-5.2', label: 'GLM 5.2 · Z.ai, 1 Mio. Kontext', vertexLocations: ['global'] },
-	{ id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite · flink & günstig', vertexLocations: ['global'] },
-	{ id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash · stark & schnell', vertexLocations: ['global'] },
-	{ id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash · Standard' },
-	{ id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro · komplexe Aufgaben' },
-	{ id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite · schnell & einfach' }
+	{ id: 'glm-5.2', label: 'GLM 5.2 · Z.ai, 1 Mio. Kontext', vertexLocations: ['global'] }
 ];
 
 /**

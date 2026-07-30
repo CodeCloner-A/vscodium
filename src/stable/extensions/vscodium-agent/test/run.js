@@ -170,7 +170,7 @@ async function testFullAgentLoop() {
 	assert.ok(roles.includes('model'));
 	const fnResponses = last.contents.filter(c => c.role === 'user' && c.parts.some(p => p.functionResponse));
 	assert.ok(fnResponses.length >= 4, 'functionResponses müssen als user-Content zurückgehen');
-	assert.ok(last.systemInstruction.parts[0].text.includes('VSCodium Agent'));
+	assert.ok(last.systemInstruction.parts[0].text.includes('You are PHI47'));
 	assert.ok(last.tools[0].functionDeclarations.length >= 9, 'Tool-Deklarationen müssen mitgesendet werden');
 
 	const lastCmdResponse = fnResponses[fnResponses.length - 1].parts[0].functionResponse.response;
@@ -259,7 +259,9 @@ async function testModelCatalog() {
 	assert.ok(ids.includes('gemini-3.5-flash'));
 	const picker = pickerModels();
 	assert.strictEqual(picker.find(m => m.id === 'gemini-3.5-flash').region, 'global', 'fester Standort muss im Picker sichtbar sein');
-	assert.strictEqual(picker.find(m => m.id === 'gemini-2.5-flash').region, undefined, 'regional freie Modelle ohne Regions-Anzeige');
+	// Regional freie Modelle bekämen keine Regions-Anzeige; im aktuellen Angebot ist
+	// jedes Modell fest verortet, deshalb wird die Regel direkt an fixedLocation geprüft.
+	assert.ok(picker.every(m => typeof m.region === 'string'), 'jedes angebotene Modell trägt eine Region');
 
 	// fixedLocation: gemeinsame Anzeige-Regel, auch für unbekannte 3.x und Präfix-Formen.
 	// (Das Standort-ROUTING liegt seit dem BYOK-Rückbau vollständig beim Proxy.)
@@ -271,7 +273,7 @@ async function testModelCatalog() {
 	// nur wirklich leere Eingabe erhält den Default.
 	assert.strictEqual(normalizeModelName('gemini-3.5-flash/'), 'gemini-3.5-flash');
 	assert.strictEqual(normalizeModelName('models/'), 'models');
-	assert.strictEqual(normalizeModelName(''), 'gemini-2.5-flash');
+	assert.strictEqual(normalizeModelName(''), 'gemini-3.5-flash', 'Rückfall-Modell ist die 3er-Generation');
 	console.log('✔ Modell-Katalog: Picker-Einträge, feste Standorte (Anzeige), Namens-Normalisierung');
 }
 
@@ -1330,6 +1332,340 @@ async function testBranding() {
 	console.log('✔ PHI47-Branding: Theme (Tokens + Farbwerte), Signalpalette, Produktname, φ-Logo, Schriften');
 }
 
+async function testSingleChatSurface() {
+	// Regressionswächter für den Webview-Rückbau (v0.17.0): Es darf genau EINE
+	// Chat-Oberfläche geben – den nativen Core-Chat. Kehrt eine der Dateien oder
+	// Contributions zurück, ist die technische Schuld wieder da.
+	const root = path.join(__dirname, '..');
+	for (const gone of ['ui/chatViewProvider.js', 'media/chat.js', 'media/chat.css']) {
+		assert.ok(!fs.existsSync(path.join(root, gone)), `Webview-Rest gefunden: ${gone}`);
+	}
+	assert.strictEqual(manifest.contributes.views, undefined, 'views-Contribution gehört zum Webview');
+	assert.strictEqual(manifest.contributes.viewsContainers, undefined, 'viewsContainers gehört zum Webview');
+	assert.ok(!manifest.activationEvents.some(e => e.startsWith('onView:')), 'onView-Aktivierung gehört zum Webview');
+	assert.ok(!manifest.contributes.menus['view/title'], 'view/title-Menü gehört zum Webview');
+	assert.ok(!manifest.contributes.commands.some(c => c.command === 'vscodiumAgent.newSession'), 'Sitzungs-Kommando gehört zum Webview');
+	for (const dead of ['vscodiumAgent.sessions.sync', 'vscodiumAgent.sessions.max']) {
+		assert.ok(!(dead in manifest.contributes.configuration.properties), `Tote Einstellung: ${dead}`);
+	}
+
+	// Das eigene Diff-Schema ist entfallen (Quelltext-Prüfung: workspaceHost.js zieht
+	// `vscode` nach und lässt sich headless nicht laden).
+	const hostSource = fs.readFileSync(path.join(root, 'lib', 'workspaceHost.js'), 'utf8');
+	// (Der Kommentarkopf darf das entfallene Schema erwähnen – geprüft wird der Code.)
+	assert.ok(!/const DIFF_SCHEME|createDiffContentProvider\(|DIFF_SCHEME\}/.test(hostSource), 'eigenes Diff-Schema gehört zum Webview');
+	assert.ok(/module\.exports = \{ WorkspaceHost/.test(hostSource));
+	const extensionSource = fs.readFileSync(path.join(root, 'extension.js'), 'utf8');
+	// Auch hier: der Kommentarkopf darf die Historie nennen, der Code nicht mehr daran hängen.
+	assert.ok(!/require\('\.\/ui\/chatViewProvider'\)|registerWebviewViewProvider|executeCommand\('vscodiumAgent\.chatView\.focus'\)/.test(extensionSource), 'extension.js hängt noch am Webview');
+	assert.ok(/workbench\.action\.chat\.open/.test(extensionSource), 'Quick-Fixes/Terminal-Debug müssen den nativen Chat öffnen');
+
+	console.log('✔ Eine Chat-Oberfläche: Webview-Dateien, Contributions, Diff-Schema und Sitzungs-Settings sind weg');
+}
+
+async function testOnboardingAndSettings() {
+	const root = path.join(__dirname, '..');
+
+	// Willkommensseite: vier Schritte, jeder mit vorhandener Markdown-Datei und
+	// einem Kommando, das es auch gibt (tote Knöpfe wären das Gegenteil von KEEP IT SIMPLE).
+	const walkthroughs = manifest.contributes.walkthroughs;
+	assert.strictEqual(walkthroughs.length, 1);
+	const wt = walkthroughs[0];
+	assert.strictEqual(wt.id, 'phi47.start');
+	assert.deepStrictEqual(wt.steps.map(s => s.id), ['phi47.signIn', 'phi47.project', 'phi47.chat', 'phi47.control']);
+	const ownCommands = new Set(manifest.contributes.commands.map(c => c.command));
+	for (const step of wt.steps) {
+		assert.ok(step.title && step.description, `Schritt unvollständig: ${step.id}`);
+		const md = step.media && step.media.markdown;
+		assert.ok(md && fs.existsSync(path.join(root, md)), `Walkthrough-Medium fehlt: ${md}`);
+		const links = [...step.description.matchAll(/\(command:([\w.-]+)\)/g)].map(m => m[1]);
+		assert.ok(links.length > 0, `Schritt ohne Aktion: ${step.id}`);
+		for (const cmd of links) {
+			// Eigene Kommandos müssen deklariert sein; Core-Kommandos (workbench.*) sind gesetzt.
+			if (cmd.startsWith('vscodiumAgent.')) {
+				assert.ok(ownCommands.has(cmd), `Walkthrough verweist auf unbekanntes Kommando: ${cmd}`);
+			} else {
+				assert.ok(cmd.startsWith('workbench.'), `Unerwartetes Kommando im Walkthrough: ${cmd}`);
+			}
+		}
+		assert.ok(Array.isArray(step.completionEvents) && step.completionEvents.length > 0, `Schritt ohne Abschluss-Ereignis: ${step.id}`);
+	}
+
+	// Erststart: Walkthrough + einmalige Anmelde-Einladung (nicht bei jedem Start).
+	const extensionSource = fs.readFileSync(path.join(root, 'extension.js'), 'utf8');
+	assert.ok(/workbench\.action\.openWalkthrough/.test(extensionSource), 'Erststart öffnet die Willkommensseite nicht');
+	assert.ok(/phi47\.firstRun/.test(extensionSource) && /phi47\.signInPrompted/.test(extensionSource), 'Erststart-Merker fehlen (sonst nervt der Hinweis bei jedem Start)');
+
+	// Einstellungen: genau vier sichtbar, der Rest nur über settings.json.
+	const props = manifest.contributes.configuration.properties;
+	const visible = Object.entries(props).filter(([, v]) => v.included !== false).map(([k]) => k);
+	const hidden = Object.entries(props).filter(([, v]) => v.included === false).map(([k]) => k);
+	assert.deepStrictEqual(visible.sort(), [
+		'vscodiumAgent.activitySignal',
+		'vscodiumAgent.approvalMode',
+		'vscodiumAgent.model',
+		'vscodiumAgent.openOnStartup'
+	], 'Sichtbare Einstellungen weichen ab (Einsteiger sollen nur diese sehen)');
+	assert.ok(hidden.length >= 5, 'Experten-Einstellungen sollten verborgen sein');
+	for (const key of visible) {
+		assert.ok(Number.isFinite(props[key].order), `Sichtbare Einstellung ohne Reihenfolge: ${key}`);
+	}
+	for (const key of hidden) {
+		const text = props[key].description || props[key].markdownDescription || '';
+		assert.ok(/settings\.json/.test(text), `Versteckte Einstellung ohne Hinweis auf settings.json: ${key}`);
+	}
+	// Verborgene Einstellungen bleiben lesbar, weil der Code überall Defaults mitgibt.
+	const serviceSource = fs.readFileSync(path.join(root, 'ui', 'agentService.js'), 'utf8');
+	for (const key of ['maxIterations', 'commandTimeoutSec', 'context.maxTreeEntries', 'terminal.mode', 'proxy.url', 'inlineEdit.model']) {
+		assert.ok(new RegExp(`get\\('${key.replace('.', '\\.')}',`).test(serviceSource), `Default fehlt im Code für ${key}`);
+	}
+
+	// Anmelde-Dialog im Chat: Wortlaut zentral, beide Knöpfe wie gefordert.
+	const { SIGN_IN_PROMPT } = require('../lib/nativeChat');
+	assert.strictEqual(SIGN_IN_PROMPT.signIn, 'Mit Google anmelden');
+	assert.strictEqual(SIGN_IN_PROMPT.skip, 'Überspringen');
+	assert.ok(SIGN_IN_PROMPT.message && SIGN_IN_PROMPT.detail);
+	const chatSource = fs.readFileSync(path.join(root, 'ui', 'nativeChatController.js'), 'utf8');
+	assert.ok(/showInformationMessage\(\s*SIGN_IN_PROMPT\.message,\s*\{ modal: true/.test(chatSource), 'Anmeldung muss als echter Dialog erscheinen');
+	assert.ok(/ensureSignedIn\(deps, stream\)/.test(chatSource), 'Chat-Anfragen müssen die Anmeldung sicherstellen');
+	assert.ok(/signInDialogSkipped = true/.test(chatSource), '„Überspringen" darf nicht bei jeder Nachricht erneut fragen');
+
+	console.log('✔ Onboarding & Einstellungen: Walkthrough (4 Schritte, echte Kommandos), Erststart-Merker, 4 sichtbare Einstellungen, Anmelde-Dialog');
+}
+
+async function testProjectMemory() {
+	const {
+		MEMORY_PATH, COMPAT_PATHS, MEMORY_RULES, buildMemorySection, appendFact, containsFact, normalizeFact, MAX_MEMORY_CHARS
+	} = require('../lib/projectMemory');
+
+	// Prompt-Abschnitt: leer bleibt leer, Inhalt wird eingebettet und gedeckelt.
+	assert.strictEqual(buildMemorySection(''), '');
+	assert.strictEqual(buildMemorySection('   \n '), '');
+	const section = buildMemorySection('- Projekt nutzt Flutter.', MEMORY_PATH);
+	assert.ok(section.includes(MEMORY_PATH) && section.includes('Projekt nutzt Flutter.'));
+	assert.ok(section.includes('trust the code'), 'Widerspruchs-Regel fehlt');
+	const long = buildMemorySection('x'.repeat(MAX_MEMORY_CHARS + 500));
+	assert.ok(long.length < MAX_MEMORY_CHARS + 400 && long.includes('gekürzt'));
+
+	// Erster Eintrag legt Kopf und Abschnitt an.
+	const first = appendFact('', 'Das Projekt nutzt Flutter mit Riverpod; kein Bloc.', { today: '2026-07-28' });
+	assert.ok(first.changed);
+	assert.ok(first.content.startsWith('# Projekt-Gedächtnis'));
+	assert.ok(first.content.includes('## Gemerkt'));
+	assert.ok(first.content.includes('- (2026-07-28) Das Projekt nutzt Flutter mit Riverpod; kein Bloc.'));
+
+	// Zweiter Eintrag hängt unten an, ohne den Kopf zu duplizieren.
+	const second = appendFact(first.content, 'Deploy läuft über Cloud Run in europe-west1.', { today: '2026-07-29' });
+	assert.ok(second.changed);
+	assert.strictEqual((second.content.match(/# Projekt-Gedächtnis/g) || []).length, 1);
+	assert.strictEqual((second.content.match(/## Gemerkt/g) || []).length, 1);
+	assert.ok(second.content.indexOf('Riverpod') < second.content.indexOf('Cloud Run'), 'Chronologie verdreht');
+
+	// Doppelte Erkenntnisse landen nicht zweimal (auch mit anderer Schreibweise).
+	assert.strictEqual(appendFact(second.content, 'Das Projekt nutzt Flutter mit Riverpod, kein Bloc', {}).changed, false);
+	assert.strictEqual(appendFact(second.content, '- Deploy läuft über Cloud Run in europe-west1.', {}).changed, false);
+	assert.ok(containsFact('- (2026-07-28) Alles über Vertex AI, kein OpenAI.', 'alles über vertex ai kein openai'));
+	assert.strictEqual(normalizeFact('  * Zwei   Leerzeichen  '), 'Zwei Leerzeichen');
+	// Leere Fakten ändern nichts.
+	assert.strictEqual(appendFact(second.content, '   ', {}).changed, false);
+
+	// Neue Einträge landen VOR einem späteren Abschnitt, nicht am Dateiende.
+	const withSections = '# Projekt-Gedächtnis\n\n## Gemerkt\n- (2026-07-01) Alt.\n\n## Notizen\nFreitext.\n';
+	const inserted = appendFact(withSections, 'Neu dazu.', { today: '2026-07-28' });
+	assert.ok(inserted.content.indexOf('Neu dazu.') < inserted.content.indexOf('## Notizen'));
+
+	// Regeln fürs Merken: was rein soll, was nicht – inklusive Geheimnis-Verbot.
+	assert.ok(/never store|NEVER secrets/i.test(MEMORY_RULES));
+	assert.ok(MEMORY_RULES.includes(MEMORY_PATH));
+
+	// Werkzeug-Weg: liest die Datei, hängt an, schreibt über den Freigabe-Pfad.
+	const host = createMockHost({}, { edits: [true], commands: [] });
+	const created = await executeTool(host, 'remember', { fact: 'Tests laufen mit node test/run.js.' });
+	assert.strictEqual(created.status, 'applied');
+	assert.ok(host.fs.get(MEMORY_PATH).includes('Tests laufen mit node test/run.js.'));
+	assert.deepStrictEqual(host.log.approvalsAsked, [MEMORY_PATH], 'Gedächtnis-Eintrag muss durch die Freigabe');
+	// Zweiter, gleicher Fakt: keine Änderung, keine erneute Freigabe.
+	const again = await executeTool(host, 'remember', { fact: 'Tests laufen mit node test/run.js' });
+	assert.strictEqual(again.status, 'unchanged');
+	assert.strictEqual(host.log.approvalsAsked.length, 1);
+	// Ablehnung wird durchgereicht (Modell sieht sie).
+	const host2 = createMockHost({}, { edits: [false], commands: [] });
+	assert.strictEqual((await executeTool(host2, 'remember', { fact: 'Wird abgelehnt.' })).status, 'rejected');
+	assert.ok((await executeTool(host2, 'remember', {})).error, 'fehlender Fakt muss Fehler liefern');
+
+	// Modi: Plan-Modi dürfen sich erinnern, aber nichts am Projekt ändern.
+	const { declarationsForMode, PLAN_MODE_TOOLS, toolConfirmation } = require('../lib/nativeChat');
+	assert.ok(PLAN_MODE_TOOLS.has('remember'));
+	const planTools = declarationsForMode('plan', undefined).map(d => d.name);
+	assert.ok(planTools.includes('remember') && !planTools.includes('write_file'));
+	const conf = toolConfirmation('remember', { fact: 'Merk dir X.' }, 'review');
+	assert.ok(conf && conf.title.includes('Gedächtnis') && conf.message === 'Merk dir X.');
+
+	// Prompts: Gedächtnis und Regeln landen im System-Prompt (Agent und Plan).
+	const agentPrompt = buildSystemPrompt({ rootName: 'p', platform: 'win32', fileTree: 'a.js', approvalMode: 'review', memory: section, memoryRules: MEMORY_RULES });
+	assert.ok(agentPrompt.includes('Projekt nutzt Flutter.') && agentPrompt.includes('Project memory rules'));
+	const planPrompt = buildPlanPrompt('plan', { rootName: 'p', platform: 'win32', fileTree: 'a.js', memory: section, memoryRules: MEMORY_RULES });
+	assert.ok(planPrompt.includes('Projekt nutzt Flutter.'));
+	// Ohne Gedächtnis bleibt der Prompt unverändert schlank.
+	assert.ok(!buildSystemPrompt({ rootName: 'p', platform: 'win32', fileTree: 'a.js', approvalMode: 'review' }).includes('Project memory'));
+
+	// Manifest + Kompatibilität + Kommando.
+	assert.ok(manifest.contributes.languageModelTools.some(t => t.name === 'remember'));
+	assert.ok(manifest.contributes.commands.some(c => c.command === 'vscodiumAgent.openMemory'));
+	assert.deepStrictEqual(COMPAT_PATHS, ['AGENTS.md', 'CLAUDE.md']);
+	const chatSource = fs.readFileSync(path.join(__dirname, '..', 'ui', 'nativeChatController.js'), 'utf8');
+	assert.ok(/loadMemorySection\(host, logger\)/.test(chatSource), 'Gedächtnis muss vor dem Lauf geladen werden');
+
+	console.log('✔ Projekt-Gedächtnis: Datei-Aufbau, Dedupe, Prompt-Einbindung, remember-Werkzeug mit Freigabe, Plan-Modi, Manifest');
+}
+
+async function testTokenAccounting() {
+	const { formatTokens, addUsage, buildUsageLine } = require('../lib/nativeChat');
+	const { MODEL_CATALOG, pickerModels } = require('../lib/modelCatalog');
+
+	// Katalog: nur noch die 3er-Generation (plus Fremd-Anbieter), inkl. 3.1 Pro.
+	const ids = MODEL_CATALOG.map(m => m.id);
+	assert.ok(!ids.some(id => id.startsWith('gemini-2.')), 'Gemini-2er gehören nicht mehr ins Angebot');
+	assert.ok(ids.includes('gemini-3.1-pro-preview'), '3.1 Pro Preview fehlt');
+	assert.ok(ids.includes('gemini-3.6-flash') && ids.includes('gemini-3.5-flash') && ids.includes('gemini-3.5-flash-lite'));
+	assert.ok(pickerModels().some(m => m.id === 'gemini-3.5-flash'));
+	// Standard-Modelle zeigen auf existierende Einträge.
+	const props = manifest.contributes.configuration.properties;
+	assert.strictEqual(props['vscodiumAgent.model'].default, 'gemini-3.5-flash');
+	assert.strictEqual(props['vscodiumAgent.inlineEdit.model'].default, 'gemini-3.5-flash-lite');
+	for (const key of ['vscodiumAgent.model', 'vscodiumAgent.inlineEdit.model']) {
+		assert.ok(ids.includes(props[key].default), `Standardmodell nicht im Katalog: ${props[key].default}`);
+	}
+
+	// Zahlenformat: klein exakt, dann kompakt mit deutschem Komma.
+	assert.strictEqual(formatTokens(0), '0');
+	assert.strictEqual(formatTokens(940), '940');
+	assert.strictEqual(formatTokens(1240), '1,2k');
+	assert.strictEqual(formatTokens(45200), '45k');
+	assert.strictEqual(formatTokens(1250000), '1,3 Mio.');
+	assert.strictEqual(formatTokens(undefined), '0');
+
+	// Verbrauch aufaddieren (Sitzung über mehrere Läufe).
+	const run1 = { prompt: 1000, output: 200, cached: 0, total: 1200, steps: 2 };
+	const run2 = { prompt: 2000, output: 300, cached: 800, total: 2300, steps: 3 };
+	assert.deepStrictEqual(addUsage(run1, run2), { prompt: 3000, output: 500, cached: 800, total: 3500, steps: 5 });
+	assert.deepStrictEqual(addUsage(undefined, run1), run1);
+
+	// Anzeige: erster Lauf ohne Sitzungssumme, später mit; Cache wird ausgewiesen.
+	assert.strictEqual(buildUsageLine({ total: 0 }, { total: 0 }), '');
+	const firstLine = buildUsageLine(run1, run1);
+	assert.ok(firstLine.includes('Lauf 1,2k') && firstLine.includes('Anfrage 1,0k') && !firstLine.includes('Sitzung'));
+	const secondLine = buildUsageLine(run2, addUsage(run1, run2));
+	assert.ok(secondLine.includes('Sitzung gesamt 3,5k'), 'Sitzungssumme fehlt');
+	assert.ok(secondLine.includes('800 aus dem Cache') && secondLine.includes('(800 gecacht)'));
+
+	// AgentRun zählt usageMetadata über alle Schritte – inklusive Cache-Anteil.
+	const client = scriptedClient([
+		[fc('read_file', { path: 'a.js' })],
+		[{ text: 'Fertig.' }]
+	]);
+	// usageMetadata an die geskripteten Antworten hängen (scriptedClient liefert nur candidates).
+	const withUsage = {
+		requests: client.requests,
+		async generateContent(req, signal) {
+			const res = await client.generateContent(req, signal);
+			const step = client.requests.length;
+			res.usageMetadata = step === 1
+				? { promptTokenCount: 1000, candidatesTokenCount: 100, totalTokenCount: 1100 }
+				: { promptTokenCount: 1500, candidatesTokenCount: 150, totalTokenCount: 1650, cachedContentTokenCount: 900 };
+			return res;
+		}
+	};
+	const host = createMockHost({ 'a.js': 'x' }, { edits: [], commands: [] });
+	const run = new AgentRun({ client: withUsage, host, ui: collectorUi(), systemPrompt: 't', retryDelayMs: 0 });
+	await run.run('Lies a.js');
+	assert.strictEqual(run.usage.steps, 2);
+	assert.strictEqual(run.usage.prompt, 2500);
+	assert.strictEqual(run.usage.output, 250);
+	assert.strictEqual(run.usage.cached, 900);
+	assert.strictEqual(run.usage.total, 2750);
+	// Ohne usageMetadata bleibt der Zähler bei 0 (keine erfundenen Zahlen).
+	const bare = new AgentRun({ client: scriptedClient([[{ text: 'ok' }]]), host: {}, ui: collectorUi(), systemPrompt: 't', retryDelayMs: 0 });
+	await bare.run('hi');
+	assert.strictEqual(bare.usage.total, 0);
+
+	// Die Anzeige hängt am Ende jeder Antwort (Controller-Verdrahtung).
+	const chatSource = fs.readFileSync(path.join(__dirname, '..', 'ui', 'nativeChatController.js'), 'utf8');
+	assert.ok(/buildUsageLine\(run\.usage, total\)/.test(chatSource), 'Verbrauchszeile fehlt im Chat');
+	assert.ok(/sessionUsage\.set\(key, total\)/.test(chatSource), 'Sitzungssumme wird nicht fortgeschrieben');
+
+	console.log('✔ Tokens & Katalog: nur 3er-Generation + 3.1 Pro, Zählung über alle Schritte, Sitzungssumme im Chat, Cache-Ausweis');
+}
+
+async function testCacheOrderAndImages() {
+	const { imageAttachmentParts, SUPPORTED_IMAGE_MIME, MAX_IMAGE_BYTES } = require('../lib/nativeChat');
+	const { MEMORY_RULES } = require('../lib/projectMemory');
+
+	// Cache-Reihenfolge: Anbieter cachen den Anfang der Anfrage. Alles Veränderliche
+	// muss deshalb HINTER den stabilen Teilen stehen – sonst ist der Präfix jedes Mal neu.
+	const ctx = {
+		rootName: 'p', platform: 'win32', shell: 'cmd', fileTree: 'a.js', approvalMode: 'review',
+		activity: 'a.js zuletzt', today: '2026-07-28',
+		memory: '== Project memory (x) ==\nProjekt nutzt Flutter.', memoryRules: MEMORY_RULES
+	};
+	for (const [name, prompt] of [['Agent', buildSystemPrompt(ctx)], ['Plan', buildPlanPrompt('plan', ctx)]]) {
+		const at = (needle) => {
+			const i = prompt.indexOf(needle);
+			assert.ok(i >= 0, `${name}-Prompt: "${needle}" fehlt`);
+			return i;
+		};
+		const rules = name === 'Agent' ? at('== Working rules ==') : at('== Plan mode rules ==');
+		const order = [rules, at('== Project memory (x) =='), at('== Project tree'), at('== Recent user activity =='), at('Current date:')];
+		for (let i = 1; i < order.length; i++) {
+			assert.ok(order[i - 1] < order[i], `${name}-Prompt: Reihenfolge stabil → volatil verletzt (Position ${i})`);
+		}
+		// Datum und Aktivität dürfen nicht im ersten Drittel stehen (dort beginnt der Cache-Präfix).
+		assert.ok(at('Current date:') > prompt.length / 3, `${name}-Prompt: Datum zu weit vorne`);
+	}
+	// Gegenprobe: Ändert sich nur Flüchtiges, bleibt der stabile Anfang Zeichen für Zeichen gleich.
+	const a = buildSystemPrompt(ctx);
+	const b = buildSystemPrompt({ ...ctx, activity: 'ganz andere Datei', today: '2026-08-01' });
+	const commonPrefix = (x, y) => { let i = 0; while (i < x.length && x[i] === y[i]) { i++; } return i; };
+	assert.ok(commonPrefix(a, b) > a.indexOf('== Project tree'), 'stabiler Präfix reicht nicht bis zum Projektbaum');
+
+	// Bild-Anhänge → Gemini-Parts; nur unterstützte Typen, Größe gedeckelt.
+	const png = { mimeType: 'image/png', data: Buffer.from([1, 2, 3]) };
+	const { parts, skipped } = imageAttachmentParts([
+		png,
+		{ mimeType: 'image/jpeg', data: new Uint8Array([4, 5]) },
+		{ mimeType: 'application/pdf', data: Buffer.from([1]) },          // falscher Typ
+		{ mimeType: 'image/png', data: Buffer.alloc(MAX_IMAGE_BYTES + 1) }, // zu groß
+		{ mimeType: 'image/png' },                                          // ohne Daten
+		null
+	]);
+	assert.strictEqual(parts.length, 2);
+	assert.strictEqual(skipped, 4);
+	assert.deepStrictEqual(parts[0], { inlineData: { mimeType: 'image/png', data: Buffer.from([1, 2, 3]).toString('base64') } });
+	assert.strictEqual(parts[1].inlineData.mimeType, 'image/jpeg');
+	assert.ok(SUPPORTED_IMAGE_MIME.has('image/webp') && !SUPPORTED_IMAGE_MIME.has('image/svg+xml'));
+	assert.deepStrictEqual(imageAttachmentParts(undefined), { parts: [], skipped: 0 });
+
+	// Der Lauf hängt die Bilder an die erste Nutzer-Nachricht.
+	const client = scriptedClient([[{ text: 'Das ist ein Screenshot.' }]]);
+	const run = new AgentRun({ client, host: {}, ui: collectorUi(), systemPrompt: 't', toolDeclarations: [], retryDelayMs: 0 });
+	await run.run('Was ist das?', { parts });
+	const sent = client.requests[0].contents[0].parts;
+	assert.strictEqual(sent.length, 3, 'Text + zwei Bilder');
+	assert.strictEqual(sent[0].text, 'Was ist das?');
+	assert.ok(sent[1].inlineData && sent[2].inlineData);
+	// Ohne Anhänge bleibt alles wie bisher.
+	const plain = new AgentRun({ client: scriptedClient([[{ text: 'ok' }]]), host: {}, ui: collectorUi(), systemPrompt: 't', toolDeclarations: [], retryDelayMs: 0 });
+	await plain.run('nur Text');
+	assert.strictEqual(plain.contents[0].parts.length, 1);
+
+	// Proposal für Bild-Anhänge ist freigeschaltet (sonst kommen sie gar nicht erst an).
+	assert.ok(manifest.enabledApiProposals.includes('chatReferenceBinaryData'));
+	const chatSource = fs.readFileSync(path.join(__dirname, '..', 'ui', 'nativeChatController.js'), 'utf8');
+	assert.ok(/collectImageAttachments\(request, logger\)/.test(chatSource), 'Bild-Anhänge werden nicht eingesammelt');
+
+	console.log('✔ Cache-Reihenfolge & Bilder: stabiler Prompt-Präfix, Anhänge gefiltert und an den Lauf gehängt');
+}
+
 async function main() {
 	await testToolBasics();
 	await testReplaceUniqueness();
@@ -1351,6 +1687,11 @@ async function main() {
 	await testNativeAgentMode();
 	await testActivitySignal();
 	await testBranding();
+	await testSingleChatSurface();
+	await testOnboardingAndSettings();
+	await testProjectMemory();
+	await testTokenAccounting();
+	await testCacheOrderAndImages();
 	console.log('\nAlle Tests bestanden.');
 }
 

@@ -52,15 +52,39 @@ class AgentRun {
 		this.contents = Array.isArray(opts.history) ? opts.history : [];
 		this.filesChanged = new Set();
 		this.toolCounter = 0;
+		/**
+		 * Tokenverbrauch dieses Laufs (Summe über alle Modell-Schritte).
+		 * `cached` sind Eingabe-Tokens, die Google aus dem Kontext-Cache bedient hat –
+		 * sie kosten nur einen Bruchteil (implizites Caching ist bei Gemini 2.5+/3.x
+		 * standardmäßig aktiv, nichts einzuschalten).
+		 */
+		this.usage = { prompt: 0, output: 0, cached: 0, total: 0, steps: 0 };
+	}
+
+	/** usageMetadata einer Modell-Antwort aufaddieren (fehlende Felder zählen als 0). */
+	_addUsage(response) {
+		const u = response && response.usageMetadata;
+		if (!u) { return; }
+		const num = (v) => (Number.isFinite(v) ? v : 0);
+		const prompt = num(u.promptTokenCount);
+		const output = Math.max(num(u.candidatesTokenCount), num(u.totalTokenCount) - prompt);
+		this.usage.prompt += prompt;
+		this.usage.output += output;
+		this.usage.cached += num(u.cachedContentTokenCount);
+		this.usage.total += num(u.totalTokenCount) || prompt + output;
+		this.usage.steps += 1;
 	}
 
 	/**
 	 * Führt eine Benutzeraufgabe aus.
 	 * @param {string} userTask
+	 * @param {{ parts?: Array<object> }} [options] zusätzliche Teile der ersten Nutzer-Nachricht
+	 *        (z. B. Bild-Anhänge als `inlineData` – der Proxy übersetzt sie pro Anbieter)
 	 * @returns {Promise<{status:'completed'|'stopped'|'max-iterations'|'error', summary?: string, success?: boolean}>}
 	 */
-	async run(userTask) {
-		this.contents.push({ role: 'user', parts: [{ text: userTask }] });
+	async run(userTask, options = {}) {
+		const extraParts = Array.isArray(options.parts) ? options.parts : [];
+		this.contents.push({ role: 'user', parts: [{ text: userTask }, ...extraParts] });
 
 		for (let iteration = 1; iteration <= this.maxIterations; iteration++) {
 			if (this.signal && this.signal.aborted) {
@@ -105,6 +129,7 @@ class AgentRun {
 				}
 			}
 
+			this._addUsage(response);
 			const blockReason = extractBlockReason(response);
 			const parts = extractParts(response);
 			if (parts.length === 0) {
@@ -190,6 +215,9 @@ function summarizeResult(name, args, result) {
 			if (result.skipped) { return 'Kommando übersprungen (abgelehnt)'; }
 			return `Exit-Code ${result.exitCode} nach ${Math.round((result.durationMs || 0) / 100) / 10}s`;
 		case 'get_diagnostics': return `${result.count} Diagnose-Einträge`;
+		case 'remember':
+			if (result.status === 'unchanged') { return 'Stand schon im Projekt-Gedächtnis'; }
+			return result.status === 'applied' ? 'Ins Projekt-Gedächtnis aufgenommen' : 'Gedächtnis-Eintrag abgelehnt';
 		case 'task_complete': return 'Aufgabe abgeschlossen';
 		default: return 'OK';
 	}

@@ -24,12 +24,16 @@ function buildSystemPrompt(ctx) {
 		? `Current date: ${ctx.today}. This is the real current date – use it when asked; never guess or fall back to your training data.`
 		: '';
 
+	// REIHENFOLGE = KOSTEN: Anbieter cachen den unveränderten ANFANG der Anfrage
+	// (Gemini 2.5+/3.x und Kimi automatisch, Cache-Tokens kosten ~10 %). Ändert sich
+	// etwas weit vorne, ist der ganze Rest des Präfix wertlos. Deshalb strikt nach
+	// Volatilität sortieren: Identität/Regeln (nie) → Gedächtnis (selten) →
+	// Projektbaum (bei Dateiänderungen) → Aktivität (jeder Lauf) → Datum (täglich).
 	return [
-		'You are the VSCodium Agent, an autonomous coding agent embedded in the VSCodium IDE.',
+		'You are PHI47, an autonomous coding agent embedded in the PHI47 IDE.',
 		'You help with: generating and completing code, refactoring existing code, finding and fixing bugs, making consistent multi-file changes, and running tests and iterating on the results.',
 		'',
 		`Workspace root: "${ctx.rootName}" | OS: ${ctx.platform}${ctx.shell ? ` | Shell: ${ctx.shell}` : ''}`,
-		...(dateLine ? [dateLine] : []),
 		'',
 		'== Working rules ==',
 		'1. Work in small, verifiable steps. Plan briefly (2-6 bullet lines) before your first tool call on a non-trivial task.',
@@ -46,13 +50,17 @@ function buildSystemPrompt(ctx) {
 		'',
 		`== Approval ==\n${approvalNote}`,
 		'',
-		'== Recent user activity ==',
-		ctx.activity || '(no recorded user activity yet)',
+		LANGUAGE_RULE,
 		'',
+		// ── ab hier: veränderlich, deshalb ans Ende (Cache-Präfix schützen) ──
+		...(ctx.memory ? [ctx.memory, ''] : []),
+		...(ctx.memoryRules ? [ctx.memoryRules, ''] : []),
 		'== Project tree (truncated) ==',
 		ctx.fileTree || '(empty workspace)',
 		'',
-		LANGUAGE_RULE
+		'== Recent user activity ==',
+		ctx.activity || '(no recorded user activity yet)',
+		...(dateLine ? ['', dateLine] : [])
 	].join('\n');
 }
 
@@ -71,20 +79,26 @@ function buildPlanPrompt(variant, ctx) {
 		? `Current date: ${ctx.today}. This is the real current date – use it when asked; never guess or fall back to your training data.`
 		: '';
 
-	const common = [
-		'You are the VSCodium Agent in a PLANNING mode. You have READ-ONLY tools (list, read, search, diagnostics, activity). You can NOT edit files and can NOT run commands – do not offer to, and do not try.',
+	// Gleiche Ordnung wie im Agent-Prompt: stabil zuerst, Veränderliches ans Ende,
+	// damit der Cache-Präfix der Anbieter über die Runden hält (siehe buildSystemPrompt).
+	const stable = [
+		'You are PHI47 in a PLANNING mode. You have READ-ONLY tools (list, read, search, diagnostics, activity) plus "remember" for the project memory file. You can NOT edit project files and can NOT run commands – do not offer to, and do not try.',
 		'Look up every fact you can find yourself via the read tools (project tree, files, search, diagnostics) instead of asking the user. The DECISIONS, however, belong to the user.',
 		'The finished plan stays in the chat history. After the user confirms it, point them to the "Plan umsetzen" button shown below the chat – one click switches to Agent mode and starts the build. Never tell them to switch modes manually.',
 		'',
 		`Workspace root: "${ctx.rootName}" | OS: ${ctx.platform}`,
-		...(dateLine ? [dateLine] : []),
+		''
+	];
+
+	const volatile = [
+		...(ctx.memory ? [ctx.memory, ''] : []),
+		...(ctx.memoryRules ? [ctx.memoryRules, ''] : []),
+		'== Project tree (truncated) ==',
+		ctx.fileTree || '(empty workspace)',
 		'',
 		'== Recent user activity ==',
 		ctx.activity || '(no recorded user activity yet)',
-		'',
-		'== Project tree (truncated) ==',
-		ctx.fileTree || '(empty workspace)',
-		''
+		...(dateLine ? ['', dateLine] : [])
 	];
 
 	const planRules = [
@@ -104,10 +118,12 @@ function buildPlanPrompt(variant, ctx) {
 	];
 
 	return [
-		...common,
+		...stable,
 		...(variant === 'plan-extended' ? grillRules : planRules),
 		'',
-		LANGUAGE_RULE
+		LANGUAGE_RULE,
+		'',
+		...volatile
 	].join('\n');
 }
 
