@@ -1727,6 +1727,34 @@ async function testModelCard() {
 	console.log('✔ Modellkarte: echte Kontexte, Bild-Fähigkeit und Preisklasse je Modell; DeepSeek im Fallback');
 }
 
+async function testAccountAndNoCopilot() {
+	const root = path.join(__dirname, '..');
+
+	// Copilot-Setup des Kerns bleibt aus: Unsere product.json neutralisiert defaultChatAgent
+	// (null statt löschen – der Build MERGT über Microsofts Werte, jq kann nicht löschen).
+	const productPath = path.join(root, '..', '..', '..', '..', 'product.json');
+	if (fs.existsSync(productPath)) {
+		const rootProduct = fs.readFileSync(productPath, 'utf8');
+		assert.ok(/"defaultChatAgent":\s*null/.test(rootProduct), 'defaultChatAgent muss in der Fork-product.json auf null stehen');
+	} else {
+		// Testkopie außerhalb des Repos (Sandbox): Prüfung entfällt, gilt im Repo-Lauf.
+		console.log('  (product.json außerhalb der Testkopie – defaultChatAgent-Prüfung übersprungen)');
+	}
+
+	// Konto-Status: Statusleisten-Eintrag + Menü mit Abmelden/Wechseln (Mehrbenutzer am Gerät).
+	assert.ok(manifest.contributes.commands.some(c => c.command === 'vscodiumAgent.accountMenu'));
+	const source = fs.readFileSync(path.join(root, 'ui', 'accountStatus.js'), 'utf8');
+	assert.ok(/createStatusBarItem\('phi47\.account'/.test(source));
+	assert.ok(/auth\.email\(\)/.test(source), 'zeigt, WER angemeldet ist');
+	assert.ok(/signOut/.test(source) && /'switch'/.test(source), 'Abmelden und Konto wechseln fehlen');
+	assert.ok(/statusBarItem\.warningBackground/.test(source), 'abgemeldet muss sichtbar hervorgehoben sein');
+	assert.ok(/secrets\.onDidChange/.test(source), 'muss auf An-/Abmeldung aus anderen Fenstern reagieren');
+	const extensionSource = fs.readFileSync(path.join(root, 'extension.js'), 'utf8');
+	assert.ok(/registerAccountStatus\(context, auth, logger\)/.test(extensionSource));
+
+	console.log('✔ Konto & Copilot-frei: defaultChatAgent neutralisiert, Konto-Status mit Abmelden/Wechseln in der Statusleiste');
+}
+
 async function main() {
 	await testToolBasics();
 	await testReplaceUniqueness();
@@ -1754,6 +1782,7 @@ async function main() {
 	await testTokenAccounting();
 	await testCacheOrderAndImages();
 	await testModelCard();
+	await testAccountAndNoCopilot();
 	console.log('\nAlle Tests bestanden.');
 }
 

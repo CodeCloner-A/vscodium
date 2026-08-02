@@ -14,6 +14,7 @@ const vscode = require('vscode');
 const { AgentService } = require('./ui/agentService');
 const { registerNativeChat } = require('./ui/nativeChatController');
 const { registerActivitySignal } = require('./ui/activitySignalController');
+const { registerAccountStatus } = require('./ui/accountStatus');
 const { registerAttachFromComputer } = require('./ui/attachFromComputer');
 const { InlineEditController } = require('./ui/inlineEditController');
 const { AgentCodeActionProvider } = require('./ui/codeActions');
@@ -324,6 +325,8 @@ function activate(context) {
 	// ── KEEP IT SIMPLE: sichtbare Aktivität + einsteigerfreundlicher Datei-Anhang ──
 	registerActivitySignal(context, logger);
 	registerAttachFromComputer(context, logger);
+	// Konto sichtbar machen: wer ist angemeldet, Abmelden/Wechseln in zwei Klicks.
+	registerAccountStatus(context, auth, logger);
 
 	// ── Erststart: Walkthrough zeigen, danach zur Anmeldung führen ──────────
 	void firstRunExperience(context, auth, logger);

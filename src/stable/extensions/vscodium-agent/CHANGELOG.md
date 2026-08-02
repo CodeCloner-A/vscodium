@@ -4,6 +4,14 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.23.0] – 2026-07-28
+
+### Entfernt
+- **Copilot-Anmeldedialog des Kerns deaktiviert:** Der Dialog „Sign in to use AI Features" (GitHub/Google/Apple) samt gelbem „Sign In"-Knopf in der Titelleiste stammte aus dem eingebauten Copilot-Einrichtungsablauf — für PHI47 mit eigener Anmeldung schlicht falsch. Neutralisiert über `"defaultChatAgent": null` in der Fork-`product.json` (der Kern prüft genau dieses Feld und legt den kompletten Setup-Apparat still); die laufende Installation wurde per Hotfix direkt bereinigt, jeder künftige Build hat es von Haus aus.
+
+### Hinzugefügt
+- **Konto-Status in der Statusleiste (rechts):** Auf einen Blick sichtbar, ob und als wer man angemeldet ist („⦿ name@gmail.com"); abgemeldet erscheint ein hervorgehobenes „Anmelden". Ein Klick öffnet das Konto-Menü: **Anmelden**, **Abmelden**, **Konto wechseln** (Abmelden + direkt neuer Login — für Geräte, die sich mehrere Nutzer teilen) und **Verbrauch anzeigen**. Reagiert live auf An-/Abmeldungen, auch aus anderen Fenstern.
+
 ## [0.22.0] – 2026-07-28
 
 ### Hinzugefügt

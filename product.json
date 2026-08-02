@@ -1,5 +1,7 @@
 {
   "//": "PHI47-Branding (20.07.2026). Diese Datei wird in prepare_vscode.sh ZULETZT über die generierte product.json gemerged (jq '.[0] * .[1]') und überschreibt damit die VSCodium-Namen – kein Patch nötig. Die win32*AppId-GUIDs bleiben vorerst die geerbten; für eigene Installer später neue GUIDs vergeben.",
+  "defaultChatAgent": null,
+  "//defaultChatAgent": "null statt löschen: prepare_vscode.sh MERGT diese Datei über Microsofts product.json (jq kann nicht löschen). null macht die Existenzprüfung im Kern falsy (chatEntitlementService: if (!productService.defaultChatAgent) return) → der komplette Copilot-Setup-Apparat (Dialog „Sign in to use AI Features", gelber Sign-In-Titelknopf, Setup-Agents) deaktiviert sich; alle Zugriffe sind optional gechaint (defaultChatAgent?.x). PHI47 hat seine eigene Anmeldung.",
   "nameShort": "PHI47",
   "nameLong": "PHI47 IDE",
   "applicationName": "phi47",
