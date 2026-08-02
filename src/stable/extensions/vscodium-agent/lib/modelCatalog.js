@@ -19,15 +19,19 @@ const { normalizeModelName } = require('./firebaseClient');
  * `vertexLocations`: erlaubte Standorte über das vertexAI-Backend. Fehlt das Feld, ist das
  * Modell regional frei und die Location-Einstellung gilt unverändert.
  */
+// Metadaten (maxInput/maxOutput/vision/priceTier) spiegeln den Server-Katalog
+// (agent-proxy/lib/catalog.js) – dort ist die Quelle der Wahrheit; hier nur der
+// Offline-Rückfall, damit die Modellkarte auch ohne Dienst echte Werte zeigt.
 const MODEL_CATALOG = [
-	{ id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash · neueste Generation', vertexLocations: ['global'] },
-	{ id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash · stark & schnell', vertexLocations: ['global'] },
-	{ id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite · flink & günstig', vertexLocations: ['global'] },
-	{ id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro · Vorschau, komplexe Aufgaben', vertexLocations: ['global'] },
-	// Fremd-Anbieter (Z.ai/Moonshot) – Routing macht der Proxy; hier nur fürs
+	{ id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash · neueste Generation', vertexLocations: ['global'], maxInputTokens: 1000000, maxOutputTokens: 128000, vision: true, priceTier: '€€' },
+	{ id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash · stark & schnell', vertexLocations: ['global'], maxInputTokens: 1000000, maxOutputTokens: 128000, vision: true, priceTier: '€€' },
+	{ id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite · flink & günstig', vertexLocations: ['global'], maxInputTokens: 1000000, maxOutputTokens: 64000, vision: true, priceTier: '€' },
+	{ id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro · Vorschau, komplexe Aufgaben', vertexLocations: ['global'], maxInputTokens: 1000000, maxOutputTokens: 64000, vision: true, priceTier: '€€€' },
+	// Fremd-Anbieter (Z.ai/Moonshot/DeepSeek) – Routing macht der Proxy; hier nur fürs
 	// Picker-Label, falls der Server-Katalog einmal nicht erreichbar ist.
-	{ id: 'glm-5.2', label: 'GLM 5.2 · Z.ai, 1 Mio. Kontext', vertexLocations: ['global'] },
-	{ id: 'kimi-k3', label: 'Kimi K3 · Moonshot, 1 Mio. Kontext', vertexLocations: ['global'] }
+	{ id: 'glm-5.2', label: 'GLM 5.2 · Z.ai, 1 Mio. Kontext', vertexLocations: ['global'], maxInputTokens: 1000000, maxOutputTokens: 128000, vision: false, priceTier: '€€' },
+	{ id: 'kimi-k3', label: 'Kimi K3 · Moonshot, 1 Mio. Kontext', vertexLocations: ['global'], maxInputTokens: 1000000, maxOutputTokens: 64000, vision: true, priceTier: '€€€' },
+	{ id: 'deepseek-chat', label: 'DeepSeek · Code-Preisbrecher', vertexLocations: ['global'], maxInputTokens: 128000, maxOutputTokens: 8000, vision: false, priceTier: '€' }
 ];
 
 /**
@@ -53,7 +57,15 @@ function fixedLocation(model) {
  * `region` ist nur gesetzt, wenn der Standort fest ist (Anzeige als Suffix/Tooltip).
  */
 function pickerModels() {
-	return MODEL_CATALOG.map(m => ({ id: m.id, label: m.label, region: fixedLocation(m.id) }));
+	return MODEL_CATALOG.map(m => ({
+		id: m.id,
+		label: m.label,
+		region: fixedLocation(m.id),
+		maxInputTokens: m.maxInputTokens,
+		maxOutputTokens: m.maxOutputTokens,
+		vision: m.vision === true,
+		priceTier: m.priceTier
+	}));
 }
 
 module.exports = { MODEL_CATALOG, pickerModels, fixedLocation };

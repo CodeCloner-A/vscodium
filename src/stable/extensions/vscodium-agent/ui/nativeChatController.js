@@ -41,7 +41,9 @@ const {
 	SIGN_IN_PROMPT,
 	addUsage,
 	buildUsageLine,
-	imageAttachmentParts
+	imageAttachmentParts,
+	modelDetail,
+	modelTooltip
 } = require('../lib/nativeChat');
 const { AgentRun } = require('../lib/agentController');
 const { buildSystemPrompt, buildPlanPrompt } = require('../lib/prompts');
@@ -454,16 +456,17 @@ function registerModelProvider(context, provider, logger) {
 					name: m.label || m.id,
 					family: MODEL_VENDOR,
 					version: '1.0',
-					// Der Katalog liefert (noch) keine Token-Limits – konservative Platzhalter;
-					// die tatsächliche Begrenzung erzwingt der Dienst.
-					maxInputTokens: 200000,
-					maxOutputTokens: 64000,
+					// Echte Werte aus dem Katalog – daraus rendert die Modellkarte ihr
+					// „Max context“; Rückfall konservativ, falls ein Eintrag sie nicht trägt.
+					maxInputTokens: Number.isFinite(m.maxInputTokens) ? m.maxInputTokens : 200000,
+					maxOutputTokens: Number.isFinite(m.maxOutputTokens) ? m.maxOutputTokens : 64000,
 					// toolCalling MUSS true sein: Agent-Modus (und Inline-Chat) filtern den
 					// Picker auf diese Fähigkeit (languageModels.ts suitableForAgentMode) –
-					// mit false bliebe die Liste leer.
-					capabilities: { toolCalling: true, imageInput: true },
-					detail: m.region ? `Region: ${m.region}` : undefined,
-					tooltip: 'PHI47-Dienst'
+					// mit false bliebe die Liste leer. imageInput je Modell (das Vision-
+					// Gating macht der Dienst; hier steuert es nur die UI-Anzeige).
+					capabilities: { toolCalling: true, imageInput: m.vision === true },
+					detail: modelDetail(m),
+					tooltip: modelTooltip(m)
 				});
 				try {
 					if (provider.auth && await provider.auth.isSignedIn()) {
@@ -503,6 +506,17 @@ function registerModelProvider(context, provider, logger) {
 		});
 		context.subscriptions.push(disposable);
 		logger.info(`Nativer Chat: Modell-Provider registriert (Vendor "${MODEL_VENDOR}").`);
+		// Katalog vorwärmen: Die Chat-UI zeigt beim Start ihre GEMERKTE Modell-Liste und
+		// fragt den Provider erst bei Bedarf – mit warmem Cache liefert die erste Abfrage
+		// dann sofort den frischen Server-Stand statt in den 5s-Timeout zu laufen
+		// (Befund 28.07.: alte Liste blieb nach Katalogwechsel bis zur ersten Nachricht sichtbar).
+		setTimeout(() => {
+			Promise.resolve()
+				.then(async () => {
+					if (provider.auth && await provider.auth.isSignedIn()) { await provider._proxyModels(); }
+				})
+				.catch(() => { /* Vorwärmen ist Komfort – Fehler zeigt ggf. die echte Abfrage */ });
+		}, 3000);
 		return true;
 	} catch (err) {
 		logger.warn('Nativer Chat: Modell-Provider-Registrierung nicht möglich.', err);

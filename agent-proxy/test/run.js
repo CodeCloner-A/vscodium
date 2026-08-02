@@ -1469,6 +1469,39 @@ async function testCapabilitiesAndVision() {
 	console.log('✔ Fähigkeits-Profile: Kimi K3 im Katalog, Parameter-Gating, Bilder nur mit Vision, dynamische Tools ab Schwelle');
 }
 
+async function testModelCardMetadata() {
+	const { findModel, publicCatalog, priceTierOf, PROVIDERS } = require('../lib/catalog');
+
+	// DeepSeek: dritter OpenAI-kompatibler Anbieter (Entscheid 28.07.2026).
+	assert.deepStrictEqual(PROVIDERS.deepseek, { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', keyEnv: 'DEEPSEEK_API_KEY' });
+	const ds = findModel('deepseek-chat');
+	assert.ok(ds && ds.provider === 'deepseek');
+	assert.deepStrictEqual(ds.quotaFactor, { input: 1, output: 1 }, 'Preisbrecher: Faktor nie < 1');
+	assert.ok(!publicCatalog(['zai', 'moonshot']).some(m => m.id === 'deepseek-chat'), 'ohne Schlüssel unsichtbar');
+	assert.ok(publicCatalog(['deepseek']).some(m => m.id === 'deepseek-chat'));
+
+	// Modellkarten-Metadaten: jedes sichtbare Modell trägt Kontext, Ausgabe, Vision, Preisklasse.
+	for (const m of publicCatalog(['zai', 'moonshot', 'deepseek'])) {
+		assert.ok(Number.isFinite(m.maxInputTokens) && m.maxInputTokens >= 100000, `maxInputTokens fehlt: ${m.id}`);
+		assert.ok(Number.isFinite(m.maxOutputTokens) && m.maxOutputTokens > 0, `maxOutputTokens fehlt: ${m.id}`);
+		assert.ok(typeof m.vision === 'boolean', `vision fehlt: ${m.id}`);
+		assert.ok(['€', '€€', '€€€'].includes(m.priceTier), `priceTier fehlt: ${m.id}`);
+	}
+	// Preisklassen-Regel: ≤2 →€, ≤7 →€€, sonst €€€ (aus der Quoten-Gewichtung).
+	assert.strictEqual(priceTierOf({ quotaFactor: { input: 1, output: 1 } }), '€');
+	assert.strictEqual(priceTierOf({ quotaFactor: { input: 6, output: 6 } }), '€€');
+	assert.strictEqual(priceTierOf({ quotaFactor: { input: 10, output: 6 } }), '€€€');
+	assert.strictEqual(priceTierOf({}), '€');
+	// Stichproben: Gemini kann Bilder, GLM/DeepSeek nicht; DeepSeek-Kontext ist ehrlich kleiner.
+	const byId = Object.fromEntries(publicCatalog(['zai', 'moonshot', 'deepseek']).map(m => [m.id, m]));
+	assert.strictEqual(byId['gemini-3.6-flash'].vision, true);
+	assert.strictEqual(byId['glm-5.2'].vision, false);
+	assert.strictEqual(byId['deepseek-chat'].maxInputTokens, 128000);
+	assert.strictEqual(byId['kimi-k3'].priceTier, '€€€');
+
+	console.log('✔ Modellkarten-Metadaten: DeepSeek im Katalog (nur mit Schlüssel), Kontext/Vision/Preisklasse je Modell');
+}
+
 async function testGlmHttp() {
 	const { createOpenAiClient } = require('../lib/openaiCompat');
 	const { publicCatalog } = require('../lib/catalog');
@@ -1555,6 +1588,7 @@ async function main() {
 	await testClaudeHttp();
 	await testOpenAiCompatTranslator();
 	await testCapabilitiesAndVision();
+	await testModelCardMetadata();
 	await testGlmHttp();
 	await testSessionStore();
 	await testSessionsHttp();

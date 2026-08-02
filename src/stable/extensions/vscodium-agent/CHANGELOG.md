@@ -4,6 +4,17 @@ Alle nennenswerten Änderungen am VSCodium Agent. Format nach [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.22.0] – 2026-07-28
+
+### Hinzugefügt
+- **Modellkarte mit echten Fähigkeiten:** Der Modell-Picker zeigt pro Modell jetzt die Wahrheit statt Platzhalter — echter Maximal-Kontext (z. B. „1 Mio." bei Gemini 3.x/GLM/Kimi, ehrliche 128k bei DeepSeek), Ausgabe-Limit, Bild-Verständnis und eine Preisklasse (€/€€/€€€, abgeleitet aus der Kontingent-Gewichtung). Die Kurzinfo rechts fasst es kompakt zusammen („eu · 1 Mio. Kontext · Bilder · €€"), der Tooltip erklärt die Details. Quelle ist der Dienst-Katalog (Proxy v0.10.0); die eingebaute Rückfall-Liste trägt dieselben Werte.
+- **DeepSeek im Angebot** („DeepSeek · Code-Preisbrecher", 128k Kontext, Preisklasse €): dritter OpenAI-kompatibler Anbieter über die bestehende Übersetzungsschicht — Produktentscheid fürs Frische-Signal. Erscheint wie üblich erst, wenn der Schlüssel im Tresor liegt (`DEEPSEEK_API_KEY`); ohne Schlüssel bleibt der Eintrag unsichtbar.
+
+## [0.21.4] – 2026-07-28
+
+### Geändert
+- **Modell-Katalog wird beim Start vorgewärmt:** Die Chat-Oberfläche zeigt nach dem Start zunächst ihre gemerkte Modell-Liste und fragt erst bei Bedarf frisch nach — nach einem Katalogwechsel wirkte der Picker dadurch kurzzeitig veraltet (2er sichtbar, Kimi fehlte, bis zur ersten Nachricht). Jetzt holt die Extension die Liste kurz nach dem Start im Hintergrund, sodass die erste Abfrage sofort den aktuellen Server-Stand liefert.
+
 ## [0.21.3] – 2026-07-28
 
 ### Behoben

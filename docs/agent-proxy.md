@@ -305,7 +305,9 @@ gcloud secrets add-iam-policy-binding zai-api-key \
 ```
 
 **Schlüssel im Deploy anhängen** — die bestehende `--set-secrets`-Zeile aus Schritt 4
-einfach erweitern (Kimi analog mit `MOONSHOT_API_KEY=moonshot-api-key:latest`):
+einfach erweitern (Kimi analog mit `MOONSHOT_API_KEY=Kimi_Key3:latest`, DeepSeek mit
+`DEEPSEEK_API_KEY=<secret-name>:latest` — links immer der Name, den der Code erwartet,
+rechts der Secret-Name im Tresor):
 
 ```bash
   --set-secrets GOOGLE_OAUTH_CLIENT_SECRET=oauth-client-secret:latest,FIREBASE_WEB_API_KEY=firebase-web-api-key:latest,ZAI_API_KEY=zai-api-key:latest \

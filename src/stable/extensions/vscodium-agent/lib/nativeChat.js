@@ -272,6 +272,42 @@ function toolConfirmation(name, args, approvalMode) {
 	}
 }
 
+// ── Modellkarte (Picker-Detail und Tooltip) ─────────────────────────────────
+
+/** Kontextgröße menschenlesbar: 128000 → „128k“, 1000000 → „1 Mio.“. */
+function formatContext(tokens) {
+	const v = Number.isFinite(tokens) ? tokens : 0;
+	if (v <= 0) { return ''; }
+	if (v >= 1000000) { return `${(v / 1000000).toFixed(v % 1000000 === 0 ? 0 : 1).replace('.', ',')} Mio.`; }
+	return `${Math.round(v / 1000)}k`;
+}
+
+/**
+ * Kurzinfo rechts im Picker: Region · Kontext · Bilder · Preisklasse.
+ * Bewusst knapp – die Karte (Tooltip + Max context) liefert die Details.
+ */
+function modelDetail(m) {
+	const parts = [];
+	if (m && m.region) { parts.push(m.region); }
+	const ctx = formatContext(m && m.maxInputTokens);
+	if (ctx) { parts.push(`${ctx} Kontext`); }
+	if (m && m.vision) { parts.push('Bilder'); }
+	if (m && m.priceTier) { parts.push(m.priceTier); }
+	return parts.join(' · ') || undefined;
+}
+
+/** Mehrzeiliger Tooltip der Modellkarte. */
+function modelTooltip(m) {
+	const lines = ['PHI47-Dienst'];
+	if (m && m.region) { lines.push(`Region: ${m.region}`); }
+	const input = formatContext(m && m.maxInputTokens);
+	const output = formatContext(m && m.maxOutputTokens);
+	if (input) { lines.push(`Kontext: ${input} Tokens${output ? ` · Ausgabe bis ${output}` : ''}`); }
+	lines.push(m && m.vision ? 'Versteht Bilder (Screenshots, Mockups)' : 'Nur Text');
+	if (m && m.priceTier) { lines.push(`Preisklasse: ${m.priceTier} (Verbrauch zählt entsprechend aufs Kontingent)`); }
+	return lines.join('\n');
+}
+
 // ── Token-Anzeige (Verbrauch pro Lauf und Sitzung) ──────────────────────────
 
 /** Tokenzahl kompakt: 940, 12,4k, 1,2 Mio. */
@@ -434,6 +470,9 @@ module.exports = {
 	SUPPORTED_IMAGE_MIME,
 	MAX_IMAGE_BYTES,
 	imageAttachmentParts,
+	formatContext,
+	modelDetail,
+	modelTooltip,
 	parseModeMarker,
 	declarationsForMode,
 	toolsMapToNames,

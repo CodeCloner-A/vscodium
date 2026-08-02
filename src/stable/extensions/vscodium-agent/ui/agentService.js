@@ -97,7 +97,17 @@ class AgentService {
 			const client = await this.buildClient();
 			// Hartes Timeout: Ein hängender Proxy darf den Modell-Picker nicht blockieren.
 			const list = await client.listModels(AbortSignal.timeout(5000));
-			const models = list.map(m => ({ id: m.id, label: m.label || m.id, region: m.location }));
+			const models = list.map(m => ({
+				id: m.id,
+				label: m.label || m.id,
+				region: m.location,
+				// Metadaten für die Modellkarte (seit Proxy v0.10.0; bei älteren
+				// Diensten fehlen sie einfach und der Picker nutzt Rückfallwerte).
+				maxInputTokens: m.maxInputTokens,
+				maxOutputTokens: m.maxOutputTokens,
+				vision: m.vision === true,
+				priceTier: m.priceTier
+			}));
 			this._proxyCatalog = { url, models, fetchedAt: now, ttlMs: 5 * 60 * 1000 };
 			return models;
 		} catch (err) {

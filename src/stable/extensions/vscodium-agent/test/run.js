@@ -1686,6 +1686,47 @@ async function testCacheOrderAndImages() {
 	console.log('✔ Cache-Reihenfolge & Bilder: stabiler Prompt-Präfix, Anhänge gefiltert und an den Lauf gehängt');
 }
 
+async function testModelCard() {
+	const { formatContext, modelDetail, modelTooltip } = require('../lib/nativeChat');
+	const { MODEL_CATALOG, pickerModels } = require('../lib/modelCatalog');
+
+	// Kontext-Formatierung: kompakt und deutsch.
+	assert.strictEqual(formatContext(1000000), '1 Mio.');
+	assert.strictEqual(formatContext(128000), '128k');
+	assert.strictEqual(formatContext(8000), '8k');
+	assert.strictEqual(formatContext(undefined), '');
+
+	// Kurzinfo im Picker: Region · Kontext · Bilder · Preisklasse (nur was da ist).
+	const kimi = { region: 'global (Moonshot)', maxInputTokens: 1000000, vision: true, priceTier: '€€€' };
+	assert.strictEqual(modelDetail(kimi), 'global (Moonshot) · 1 Mio. Kontext · Bilder · €€€');
+	assert.strictEqual(modelDetail({ region: 'eu' }), 'eu');
+	assert.strictEqual(modelDetail({}), undefined);
+
+	// Tooltip: mehrzeilig, ehrlich zu Text-only-Modellen.
+	const tip = modelTooltip({ region: 'global (DeepSeek)', maxInputTokens: 128000, maxOutputTokens: 8000, vision: false, priceTier: '€' });
+	assert.ok(tip.startsWith('PHI47-Dienst'));
+	assert.ok(tip.includes('Kontext: 128k Tokens · Ausgabe bis 8k'));
+	assert.ok(tip.includes('Nur Text') && tip.includes('Preisklasse: €'));
+	assert.ok(modelTooltip({ vision: true }).includes('Versteht Bilder'));
+
+	// Lokaler Fallback: DeepSeek dabei, jedes Modell mit vollständigen Karten-Daten.
+	assert.ok(MODEL_CATALOG.some(m => m.id === 'deepseek-chat'), 'DeepSeek fehlt im Fallback');
+	for (const m of pickerModels()) {
+		assert.ok(Number.isFinite(m.maxInputTokens), `maxInputTokens fehlt: ${m.id}`);
+		assert.ok(typeof m.vision === 'boolean' && ['€', '€€', '€€€'].includes(m.priceTier), `Karten-Daten unvollständig: ${m.id}`);
+	}
+
+	// Der Picker speist die Karte aus den Katalogwerten (kein Platzhalter mehr).
+	const chatSource = fs.readFileSync(path.join(__dirname, '..', 'ui', 'nativeChatController.js'), 'utf8');
+	assert.ok(/Number\.isFinite\(m\.maxInputTokens\) \? m\.maxInputTokens/.test(chatSource), 'Karte nutzt keine echten Kontextwerte');
+	assert.ok(/imageInput: m\.vision === true/.test(chatSource), 'Bild-Fähigkeit nicht pro Modell');
+	assert.ok(/detail: modelDetail\(m\)/.test(chatSource) && /tooltip: modelTooltip\(m\)/.test(chatSource));
+	const serviceSource = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agentService.js'), 'utf8');
+	assert.ok(/maxInputTokens: m\.maxInputTokens/.test(serviceSource), 'Kern-Dienst reicht Metadaten nicht durch');
+
+	console.log('✔ Modellkarte: echte Kontexte, Bild-Fähigkeit und Preisklasse je Modell; DeepSeek im Fallback');
+}
+
 async function main() {
 	await testToolBasics();
 	await testReplaceUniqueness();
@@ -1712,6 +1753,7 @@ async function main() {
 	await testProjectMemory();
 	await testTokenAccounting();
 	await testCacheOrderAndImages();
+	await testModelCard();
 	console.log('\nAlle Tests bestanden.');
 }
 
